@@ -1,112 +1,40 @@
 import argparse
 import json
-from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 
-from core.measurement.area import measure_components
-from core.preprocessing import load_grayscale
-from core.segmentation import segment_anomalies
-from core.visualization import save_annotated_image, save_mask_image
-
-
-def build_strategy(description, unit="pixel"):
-    text = (description or "").lower()
-    measurement_type = "area_count"
-    if any(word in text for word in ["bridge", "open", "gap", "断线", "桥连", "缺口"]):
-        measurement_type = "bridge_open"
-    elif any(word in text for word in ["cd", "width", "space", "线宽", "间距"]):
-        measurement_type = "cd_space"
-
-    return {
-        "defect_type": "unknown",
-        "target_structure": "unknown",
-        "measurement_type": measurement_type,
-        "preprocess": {
-            "grayscale": True,
-            "normalize": True,
-        },
-        "segmentation": {
-            "method": "auto_bright_dark_threshold",
-            "sensitivity": 1.8,
-        },
-        "measurement": {
-            "min_area_px": 20,
-            "unit": unit,
-        },
-        "notes": [
-            "MVP baseline: no LLM or SAM is connected yet.",
-            "If no calibration is provided, results are reported in pixels.",
-        ],
-    }
-
-
-def make_run_dir(output_root, defect_type):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    safe_defect = "".join(ch if ch.isalnum() else "_" for ch in defect_type).strip("_") or "unknown"
-    run_dir = Path(output_root) / f"{timestamp}_{safe_defect}"
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
-
-
-def write_algorithm_stub(run_dir, args):
-    script = f'''"""Generated MVP runner record.
-
-This file records the command shape used for this run. In the current MVP,
-the reusable implementation lives in project modules under core/.
-"""
-
-COMMAND = {{
-    "target": {str(args.target)!r},
-    "reference": {str(args.reference) if args.reference else None!r},
-    "description": {args.description!r},
-    "output_dir": {str(run_dir)!r},
-}}
-'''
-    (run_dir / "algorithm.py").write_text(script, encoding="utf-8")
-
 
 def run(args):
-    strategy = build_strategy(args.description, unit=args.unit)
-    run_dir = make_run_dir(args.output_root, strategy["defect_type"])
+    from graph_workflow import run_graph
+    from providers.vision import MockVisionProvider
 
-    image = load_grayscale(args.target)
-    mask, segmentation_meta = segment_anomalies(
-        image,
-        sensitivity=strategy["segmentation"]["sensitivity"],
+    state = run_graph(
+        target_image_path=args.target,
+        description=args.description,
+        reference_annotation_path=args.reference,
+        output_root=args.output_root,
+        provider=MockVisionProvider(),
+        unit=args.unit,
     )
-    measurements = measure_components(
-        mask,
-        min_area=strategy["measurement"]["min_area_px"],
-        unit=strategy["measurement"]["unit"],
-    )
+    return Path(state["run_dir"]), state_to_output(state)
 
-    notes = list(strategy["notes"])
-    if args.reference is None:
-        notes.append("No reference image was provided for this run.")
-    if args.unit == "pixel":
-        notes.append("No physical calibration was provided; values use pixel units.")
-    if not measurements["results"]:
-        notes.append("No defect region passed the current area filter.")
 
-    output = {
-        "defect_type": strategy["defect_type"],
-        "measurement_type": strategy["measurement_type"],
-        "unit": strategy["measurement"]["unit"],
-        "status": "ok" if measurements["results"] else "empty",
-        "results": measurements["results"],
-        "summary": measurements["summary"],
-        "segmentation": segmentation_meta,
-        "notes": notes,
+def state_to_output(state):
+    return {
+        "defect_type": state["strategy"]["defect_type"],
+        "measurement_type": state["strategy"]["measurement_type"],
+        "unit": state["measurements"]["summary"]["unit"],
+        "status": state["status"],
+        "results": state["measurements"]["results"],
+        "summary": state["measurements"]["summary"],
+        "segmentation": state.get("segmentation", {}),
+        "metrics": state.get("metrics", {}),
+        "notes": state["strategy"].get("notes", []),
+        "conversation": state.get("conversation", []),
+        "latest_iteration": state.get("iteration", 0),
+        "latest_annotated_image": state.get("annotated_image_path"),
+        "latest_mask": state.get("predicted_mask_path"),
     }
-
-    save_mask_image(mask, run_dir / "mask.png")
-    save_annotated_image(args.target, measurements["results"], run_dir / "result_annotated.png")
-    (run_dir / "strategy.json").write_text(json.dumps(strategy, indent=2, ensure_ascii=False), encoding="utf-8")
-    (run_dir / "measurements.json").write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_algorithm_stub(run_dir, args)
-
-    return run_dir, output
 
 
 def parse_args():
