@@ -5,4 +5,5 @@ scikit-image
 langgraph
 openai
 gradio
+huggingface-hub<1.0
 pytest
