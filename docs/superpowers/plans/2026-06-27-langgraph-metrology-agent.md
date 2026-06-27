@@ -4,9 +4,9 @@
 
 **Goal:** Build a LangGraph-based, Codex-like DRAM/SEM defect metrology agent that uses an Alibaba Cloud multimodal model to generate segmentation strategies, executes reproducible local image algorithms, and supports brush-plus-text feedback loops.
 
-**Architecture:** Keep the existing lightweight Python project and custom HTTP UI. Add focused modules for strategy/state types, evaluation metrics, vision providers, and LangGraph orchestration; preserve the existing CLI and `/api/run` entry points while routing them through the new graph.
+**Architecture:** Keep the existing Python image-processing core, but replace the custom `http.server` UI with a Gradio Blocks workspace. Add focused modules for strategy/state types, evaluation metrics, vision providers, and LangGraph orchestration; preserve the CLI while making Gradio the primary demo surface.
 
-**Tech Stack:** Python, NumPy, Pillow, OpenCV/skimage baseline segmentation, LangGraph, OpenAI-compatible Alibaba Cloud API client, pytest, custom `http.server` UI.
+**Tech Stack:** Python, NumPy, Pillow, OpenCV/skimage baseline segmentation, LangGraph, OpenAI-compatible Alibaba Cloud API client, Gradio Blocks, pytest.
 
 ---
 
@@ -21,7 +21,7 @@
 - `core/measurement/area.py`: add `area_ratio` to the summary.
 - `core/measurement/evaluation.py`: compare predicted mask with optional reference annotation.
 - `agent.py`: preserve CLI API and call the LangGraph runner.
-- `ui/app.py`: evolve the existing chat UI API for reference annotation and feedback.
+- `ui/app.py`: replace the existing custom HTML server with a Gradio Blocks app using `Chatbot`, `Image`, `ImageEditor`, `Dataframe`, `JSON`, `File`, and `State`.
 - `tests/`: pytest coverage for metrics, strategy defaults, providers, segmentation, and graph flow.
 
 The existing `main.py`, `README.md`, and `docs/design.md` remain stable unless a task explicitly updates them.
@@ -46,6 +46,7 @@ opencv-python-headless
 scikit-image
 langgraph
 openai
+gradio
 pytest
 ```
 
@@ -846,6 +847,7 @@ def run_graph(
     unit="pixel",
     max_iterations=2,
     existing_run_dir=None,
+    initial_iteration=0,
 ):
     graph = build_graph(provider=provider or MockVisionProvider(), max_iterations=max_iterations)
     initial_state = {
@@ -855,7 +857,7 @@ def run_graph(
         "feedback_brush_path": str(feedback_brush_path) if feedback_brush_path else None,
         "feedback_text": feedback_text,
         "run_dir": str(existing_run_dir or make_run_dir(output_root)),
-        "iteration": 0,
+        "iteration": initial_iteration,
         "conversation": [],
         "run_history": [],
         "status": "pending",
@@ -1132,38 +1134,209 @@ git commit -m "feat: route CLI through LangGraph workflow"
 
 ---
 
-### Task 8: UI Backend For Reference Annotation And Feedback
+### Task 8: Gradio Result Adapters
 
 **Files:**
-- Modify: `ui/app.py`
-- Create: `tests/test_ui_handlers.py`
+- Create: `ui/gradio_adapters.py`
+- Create: `tests/test_gradio_adapters.py`
 
-- [ ] **Step 1: Extract response file mapping test**
+- [ ] **Step 1: Write the failing adapter tests**
 
-Create `tests/test_ui_handlers.py`:
+Create `tests/test_gradio_adapters.py`:
 
 ```python
 from pathlib import Path
 
-from ui.app import build_file_links
+from ui.gradio_adapters import (
+    save_feedback_layer,
+    measurement_rows,
+    output_files,
+    state_to_chat_messages,
+)
 
 
-def test_build_file_links_points_to_latest_iteration():
-    root = Path("/repo")
-    run_dir = root / "outputs" / "run_001"
-    result = {
-        "latest_iteration": 1,
-        "latest_annotated_image": str(run_dir / "iteration_1" / "result_annotated.png"),
-        "latest_mask": str(run_dir / "iteration_1" / "mask.png"),
+def test_measurement_rows_convert_results_to_table_rows():
+    state = {
+        "measurements": {
+            "results": [
+                {"id": 1, "area": 12, "bbox": [2, 3, 4, 5], "width": 4, "height": 5, "aspect_ratio": 0.8}
+            ]
+        }
     }
 
-    files = build_file_links(root, run_dir, result)
+    rows = measurement_rows(state)
 
-    assert files["annotated"] == "/outputs/run_001/iteration_1/result_annotated.png"
-    assert files["mask"] == "/outputs/run_001/iteration_1/mask.png"
-    assert files["measurements"] == "/outputs/run_001/iteration_1/measurements.json"
-    assert files["strategy"] == "/outputs/run_001/iteration_1/strategy.json"
-    assert files["graph_state"] == "/outputs/run_001/iteration_1/graph_state.json"
+    assert rows == [[1, 12, 4, 5, 0.8, "[2, 3, 4, 5]"]]
+
+
+def test_state_to_chat_messages_uses_openai_role_content_format():
+    state = {
+        "conversation": [
+            {"role": "assistant", "content": "我先看图。"},
+            {"role": "assistant", "content": "这一轮标出 1 个区域。"},
+        ]
+    }
+
+    messages = state_to_chat_messages(state)
+
+    assert messages == [
+        {"role": "assistant", "content": "我先看图。"},
+        {"role": "assistant", "content": "这一轮标出 1 个区域。"},
+    ]
+
+
+def test_output_files_returns_latest_artifacts(tmp_path):
+    run_dir = tmp_path / "outputs" / "run_001"
+    iteration_dir = run_dir / "iteration_0"
+    iteration_dir.mkdir(parents=True)
+    state = {
+        "run_dir": str(run_dir),
+        "iteration": 0,
+        "annotated_image_path": str(iteration_dir / "result_annotated.png"),
+        "predicted_mask_path": str(iteration_dir / "mask.png"),
+    }
+
+    files = output_files(state)
+
+    assert files == [
+        str(iteration_dir / "result_annotated.png"),
+        str(iteration_dir / "mask.png"),
+        str(iteration_dir / "measurements.json"),
+        str(iteration_dir / "strategy.json"),
+        str(iteration_dir / "graph_state.json"),
+    ]
+
+
+def test_save_feedback_layer_writes_composite_image(tmp_path):
+    import numpy as np
+
+    image = np.zeros((2, 2, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+
+    path = save_feedback_layer({"composite": image}, tmp_path)
+
+    assert Path(path).exists()
+    assert Path(path).suffix == ".png"
+```
+
+- [ ] **Step 2: Run the tests and verify they fail**
+
+Run:
+
+```bash
+pytest tests/test_gradio_adapters.py -v
+```
+
+Expected: import fails because `ui.gradio_adapters` does not exist.
+
+- [ ] **Step 3: Implement Gradio adapters**
+
+Create `ui/gradio_adapters.py`:
+
+```python
+from pathlib import Path
+
+
+def state_to_chat_messages(state):
+    return [
+        {"role": item.get("role", "assistant"), "content": item.get("content", "")}
+        for item in state.get("conversation", [])
+    ]
+
+
+def measurement_rows(state):
+    rows = []
+    for item in state.get("measurements", {}).get("results", []):
+        rows.append([
+            item.get("id"),
+            item.get("area"),
+            item.get("width"),
+            item.get("height"),
+            item.get("aspect_ratio"),
+            str(item.get("bbox")),
+        ])
+    return rows
+
+
+def output_files(state):
+    run_dir = Path(state["run_dir"])
+    iteration_dir = run_dir / f"iteration_{state.get('iteration', 0)}"
+    return [
+        state["annotated_image_path"],
+        state["predicted_mask_path"],
+        str(iteration_dir / "measurements.json"),
+        str(iteration_dir / "strategy.json"),
+        str(iteration_dir / "graph_state.json"),
+    ]
+
+
+def save_feedback_layer(editor_value, run_dir):
+    if not editor_value:
+        return None
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    output_path = run_dir / "feedback_brush.png"
+
+    if isinstance(editor_value, dict):
+        composite = editor_value.get("composite")
+        if composite:
+            return _save_editor_image(composite, output_path)
+        layers = editor_value.get("layers") or []
+        if layers:
+            return _save_editor_image(layers[-1], output_path)
+    return None
+
+
+def _save_editor_image(value, output_path):
+    if isinstance(value, str):
+        return value
+
+    from PIL import Image
+
+    Image.fromarray(value).save(output_path)
+    return str(output_path)
+```
+
+- [ ] **Step 4: Run adapter tests**
+
+Run:
+
+```bash
+pytest tests/test_gradio_adapters.py -v
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add ui/gradio_adapters.py tests/test_gradio_adapters.py
+git commit -m "feat: add Gradio result adapters"
+```
+
+---
+
+### Task 9: Replace Custom UI With Gradio Blocks
+
+**Files:**
+- Delete old implementation in: `ui/app.py`
+- Modify: `ui/app.py`
+- Create: `tests/test_gradio_app.py`
+
+- [ ] **Step 1: Write a smoke test for app construction**
+
+Create `tests/test_gradio_app.py`:
+
+```python
+import gradio as gr
+
+from ui.app import build_app
+
+
+def test_build_app_returns_gradio_blocks():
+    app = build_app()
+
+    assert isinstance(app, gr.Blocks)
 ```
 
 - [ ] **Step 2: Run the test and verify it fails**
@@ -1171,396 +1344,281 @@ def test_build_file_links_points_to_latest_iteration():
 Run:
 
 ```bash
-pytest tests/test_ui_handlers.py -v
+pytest tests/test_gradio_app.py -v
 ```
 
-Expected: import fails because `build_file_links` does not exist.
+Expected: import fails or assertion fails because `build_app` does not exist yet.
 
-- [ ] **Step 3: Add file-link helper**
+- [ ] **Step 3: Replace `ui/app.py` with Gradio app skeleton**
 
-In `ui/app.py`, add:
+Replace `ui/app.py` with:
 
 ```python
-def build_file_links(root, run_dir, result):
-    latest_iteration = int(result.get("latest_iteration", 0))
-    iteration_dir = Path(run_dir) / f"iteration_{latest_iteration}"
-    iteration_rel = iteration_dir.relative_to(root)
-    return {
-        "annotated": "/" + str(Path(result["latest_annotated_image"]).relative_to(root)),
-        "mask": "/" + str(Path(result["latest_mask"]).relative_to(root)),
-        "measurements": "/" + str(iteration_rel / "measurements.json"),
-        "strategy": "/" + str(iteration_rel / "strategy.json"),
-        "metrics": "/" + str(iteration_rel / "metrics.json"),
-        "graph_state": "/" + str(iteration_rel / "graph_state.json"),
-    }
+from pathlib import Path
+
+import gradio as gr
+
+from graph_workflow import run_graph
+from providers.vision import MockVisionProvider
+from ui.gradio_adapters import (
+    measurement_rows,
+    output_files,
+    save_feedback_layer,
+    state_to_chat_messages,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_ROOT = ROOT / "outputs"
+
+
+def run_initial(target_image, description, reference_annotation, unit):
+    if not target_image:
+        raise gr.Error("请先上传原图。")
+    if not description:
+        raise gr.Error("请写一句缺陷描述。")
+
+    state = run_graph(
+        target_image_path=target_image,
+        description=description,
+        reference_annotation_path=reference_annotation,
+        output_root=OUTPUT_ROOT,
+        provider=MockVisionProvider(),
+        unit=unit or "pixel",
+    )
+    return gradio_outputs(state)
+
+
+def run_feedback(app_state, feedback_editor, feedback_text):
+    if not app_state:
+        raise gr.Error("请先完成一轮初始量测。")
+    if not feedback_text:
+        raise gr.Error("请写一句反馈，例如“这里漏了”。")
+
+    feedback_brush_path = save_feedback_layer(feedback_editor, app_state["run_dir"])
+    next_iteration = app_state.get("iteration", 0) + 1
+    state = run_graph(
+        target_image_path=app_state["target_image_path"],
+        description=app_state["description"],
+        reference_annotation_path=app_state.get("reference_annotation_path"),
+        output_root=OUTPUT_ROOT,
+        existing_run_dir=app_state["run_dir"],
+        initial_iteration=next_iteration,
+        feedback_brush_path=feedback_brush_path,
+        feedback_text=feedback_text,
+        provider=MockVisionProvider(),
+        unit=app_state.get("unit", "pixel"),
+        max_iterations=next_iteration + 1,
+    )
+    return gradio_outputs(state)
+
+
+def gradio_outputs(state):
+    return (
+        state_to_chat_messages(state),
+        state.get("annotated_image_path"),
+        state.get("predicted_mask_path"),
+        state.get("annotated_image_path"),
+        measurement_rows(state),
+        state.get("strategy", {}),
+        state.get("metrics", {}),
+        output_files(state),
+        state,
+    )
+
+
+def build_app():
+    with gr.Blocks(title="DRAM 缺陷量测 Agent", theme=gr.themes.Soft()) as app:
+        gr.Markdown("# DRAM 缺陷量测 Agent")
+        gr.Markdown("像和 Codex 协作一样描述缺陷，Agent 会生成策略、标注缺陷，并支持画笔反馈重跑。")
+
+        app_state = gr.State(value=None)
+
+        with gr.Row():
+            with gr.Column(scale=4):
+                chat = gr.Chatbot(
+                    label="Agent 对话",
+                    type="messages",
+                    height=520,
+                )
+                description = gr.Textbox(
+                    label="缺陷描述 / 反馈描述",
+                    placeholder="例如：找亮色残留，量面积和数量",
+                    lines=3,
+                )
+                with gr.Row():
+                    run_button = gr.Button("开始量测", variant="primary")
+                    feedback_button = gr.Button("应用画笔反馈并重跑")
+
+            with gr.Column(scale=5):
+                target_image = gr.Image(
+                    label="原图 target（必填）",
+                    type="filepath",
+                )
+                reference_annotation = gr.Image(
+                    label="参考标注图（可选，同图人工标注）",
+                    type="filepath",
+                )
+                annotated_image = gr.Image(label="标注结果", type="filepath")
+                mask_image = gr.Image(label="预测 mask", type="filepath")
+                feedback_editor = gr.ImageEditor(
+                    label="画笔反馈：在标注结果上圈出要修改的位置",
+                    type="numpy",
+                )
+
+            with gr.Column(scale=4):
+                unit = gr.Textbox(label="单位", value="pixel")
+                measurements = gr.Dataframe(
+                    headers=["ID", "面积", "宽", "高", "长宽比", "外接框"],
+                    label="面积 / 数量结果",
+                    interactive=False,
+                )
+                strategy_json = gr.JSON(label="当前 strategy")
+                metrics_json = gr.JSON(label="参考标注评估")
+                files = gr.File(label="输出文件", file_count="multiple")
+
+        run_outputs = [
+            chat,
+            annotated_image,
+            mask_image,
+            feedback_editor,
+            measurements,
+            strategy_json,
+            metrics_json,
+            files,
+            app_state,
+        ]
+        run_button.click(
+            fn=run_initial,
+            inputs=[target_image, description, reference_annotation, unit],
+            outputs=run_outputs,
+        )
+        feedback_button.click(
+            fn=run_feedback,
+            inputs=[app_state, feedback_editor, description],
+            outputs=run_outputs,
+        )
+
+    return app
+
+
+def main():
+    build_app().launch(server_name="127.0.0.1", server_port=7860)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-Then replace the old hard-coded `files = { ... }` block in `handle_run` with:
-
-```python
-    files = build_file_links(ROOT, run_dir, result)
-```
-
-- [ ] **Step 4: Add reference annotation naming**
-
-In `handle_run`, keep accepting the existing form field name `reference` but treat it as same-image reference annotation:
-
-```python
-    reference_path = save_upload(form, "reference", required=False)
-```
-
-No backend rename is required in this task; the frontend label changes in Task 9.
-
-- [ ] **Step 5: Run UI helper test**
+- [ ] **Step 4: Run the Gradio app smoke test**
 
 Run:
 
 ```bash
-pytest tests/test_ui_handlers.py -v
+pytest tests/test_gradio_app.py -v
 ```
 
 Expected: test passes.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add ui/app.py tests/test_ui_handlers.py
-git commit -m "feat: expose latest graph outputs in UI API"
+git add ui/app.py tests/test_gradio_app.py
+git commit -m "feat: replace custom UI with Gradio workspace"
 ```
 
 ---
 
-### Task 9: Codex-Like Brush Feedback UI
+### Task 10: Gradio Feedback Integration Test
 
 **Files:**
-- Modify: `ui/app.py`
+- Create: `tests/test_gradio_callbacks.py`
 
-- [ ] **Step 1: Update upload copy**
+- [ ] **Step 1: Write callback tests**
 
-In `render_app()`, change the reference upload tile copy from:
-
-```html
-<span>参考图</span>
-<small>可选，用来说明缺陷长什么样</small>
-```
-
-to:
-
-```html
-<span>参考标注图</span>
-<small>可选，同一张原图上的人工标注</small>
-```
-
-- [ ] **Step 2: Add feedback controls to result messages**
-
-Inside `renderResultMessage(payload)`, after the downloads section, add this HTML:
-
-```javascript
-              <section class="feedback-workspace">
-                <p class="label">画笔反馈</p>
-                <canvas class="feedback-canvas" width="640" height="420"></canvas>
-                <textarea class="feedback-text" rows="3" placeholder="例如：左下角这里漏了；右上角这些小点不要算"></textarea>
-                <button type="button" class="feedback-submit">应用反馈并重跑</button>
-              </section>
-```
-
-- [ ] **Step 3: Add brush initialization JavaScript**
-
-After `timeline.appendChild(node);` in `renderResultMessage`, add:
-
-```javascript
-          initializeFeedbackCanvas(node, files.annotated, payload.run_dir);
-```
-
-Then add this function before the `form.addEventListener` block:
-
-```javascript
-        function initializeFeedbackCanvas(node, imageUrl, runDir) {
-          const canvas = node.querySelector('.feedback-canvas');
-          const context = canvas.getContext('2d');
-          const image = new Image();
-          let drawing = false;
-
-          image.onload = () => {
-            context.clearRect(0, 0, canvas.width, canvas.height);
-            context.drawImage(image, 0, 0, canvas.width, canvas.height);
-          };
-          image.src = imageUrl;
-
-          canvas.addEventListener('pointerdown', (event) => {
-            drawing = true;
-            context.beginPath();
-            context.lineWidth = 8;
-            context.strokeStyle = '#ff3040';
-            context.lineCap = 'round';
-            context.moveTo(event.offsetX, event.offsetY);
-          });
-
-          canvas.addEventListener('pointermove', (event) => {
-            if (!drawing) return;
-            context.lineTo(event.offsetX, event.offsetY);
-            context.stroke();
-          });
-
-          canvas.addEventListener('pointerup', () => {
-            drawing = false;
-          });
-
-          node.querySelector('.feedback-submit').addEventListener('click', async () => {
-            const feedbackText = node.querySelector('.feedback-text').value.trim();
-            const feedbackBrush = canvas.toDataURL('image/png');
-            await submitFeedback(runDir, feedbackText, feedbackBrush);
-          });
-        }
-```
-
-- [ ] **Step 4: Add feedback submit JavaScript**
-
-Add this function before the `form.addEventListener` block:
-
-```javascript
-        async function submitFeedback(runDir, feedbackText, feedbackBrush) {
-          if (!feedbackText) {
-            alert('请写一句反馈，例如“这里漏了”或“这些不要算”。');
-            return;
-          }
-
-          const thinking = pushThinking();
-          statusPill.textContent = '根据反馈重跑';
-          statusCard.textContent = '反馈处理中';
-
-          try {
-            const response = await fetch('/api/feedback', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({run_dir: runDir, feedback_text: feedbackText, feedback_brush: feedbackBrush}),
-            });
-            const payload = await response.json();
-            thinking.remove();
-            if (!payload.ok) throw new Error(payload.error || '反馈运行失败');
-            renderResultMessage(payload);
-            statusPill.textContent = '反馈已应用';
-            statusCard.textContent = `${payload.result.summary.count} 个区域`;
-          } catch (error) {
-            thinking.remove();
-            alert(error.message || String(error));
-            statusPill.textContent = '失败';
-            statusCard.textContent = '失败';
-          }
-        }
-```
-
-- [ ] **Step 5: Add basic feedback CSS**
-
-In the `<style>` block, add:
-
-```css
-    .feedback-workspace {
-      margin-top: 14px;
-      display: grid;
-      gap: 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--soft);
-      padding: 12px;
-    }
-    .feedback-canvas {
-      width: 100%;
-      max-width: 640px;
-      aspect-ratio: 64 / 42;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: white;
-      touch-action: none;
-    }
-    .feedback-text {
-      width: 100%;
-      resize: vertical;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      font: inherit;
-    }
-```
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add ui/app.py
-git commit -m "feat: add brush feedback controls"
-```
-
----
-
-### Task 10: Feedback API Backend
-
-**Files:**
-- Modify: `ui/app.py`
-- Modify: `graph_workflow.py`
-- Create: `tests/test_feedback_payload.py`
-
-- [ ] **Step 1: Write feedback image decoding test**
-
-Create `tests/test_feedback_payload.py`:
+Create `tests/test_gradio_callbacks.py`:
 
 ```python
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
-from ui.app import save_feedback_brush
+from ui.app import run_feedback, run_initial
 
 
-def test_save_feedback_brush_writes_png(tmp_path):
-    data_url = (
-        "data:image/png;base64,"
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
-        "AAAADUlEQVR42mP8z8BQDwAFgwJ/lU9nNwAAAABJRU5ErkJggg=="
+def test_run_initial_returns_chat_images_table_and_state(tmp_path, monkeypatch):
+    target = tmp_path / "target.png"
+    image = np.full((24, 24), 40, dtype=np.uint8)
+    image[8:14, 9:15] = 180
+    Image.fromarray(image, mode="L").save(target)
+
+    monkeypatch.setattr("ui.app.OUTPUT_ROOT", tmp_path / "outputs")
+
+    chat, annotated, mask, editor_bg, rows, strategy, metrics, files, state = run_initial(
+        str(target),
+        "找亮色残留，量面积和数量",
+        None,
+        "pixel",
     )
 
-    path = save_feedback_brush(tmp_path, data_url)
+    assert chat
+    assert Path(annotated).exists()
+    assert Path(mask).exists()
+    assert editor_bg == annotated
+    assert rows[0][1] > 0
+    assert strategy["measurement_type"] == "area_count"
+    assert metrics["status"] == "skipped"
+    assert len(files) == 5
+    assert state["status"] == "ok"
 
-    assert Path(path).exists()
-    assert Image.open(path).size == (1, 1)
+
+def test_run_feedback_appends_second_iteration(tmp_path, monkeypatch):
+    target = tmp_path / "target.png"
+    image = np.full((24, 24), 40, dtype=np.uint8)
+    image[8:14, 9:15] = 180
+    Image.fromarray(image, mode="L").save(target)
+    monkeypatch.setattr("ui.app.OUTPUT_ROOT", tmp_path / "outputs")
+
+    *_, state = run_initial(str(target), "找亮色残留，量面积和数量", None, "pixel")
+    feedback_image = tmp_path / "feedback.png"
+    Image.fromarray(image, mode="L").save(feedback_image)
+
+    *_, new_state = run_feedback(
+        state,
+        {"composite": str(feedback_image)},
+        "这里漏了，重新调高灵敏度",
+    )
+
+    assert new_state["iteration"] == 1
+    assert Path(new_state["run_dir"], "iteration_1", "graph_state.json").exists()
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [ ] **Step 2: Run the tests and verify the callback behavior**
 
 Run:
 
 ```bash
-pytest tests/test_feedback_payload.py -v
+pytest tests/test_gradio_callbacks.py -v
 ```
 
-Expected: import fails because `save_feedback_brush` does not exist.
+Expected: both tests pass.
 
-- [ ] **Step 3: Add feedback brush saving helper**
-
-In `ui/app.py`, add imports:
-
-```python
-import base64
-```
-
-Add:
-
-```python
-def save_feedback_brush(run_dir, data_url):
-    if not data_url.startswith("data:image/png;base64,"):
-        raise ValueError("feedback_brush must be a PNG data URL")
-    payload = data_url.split(",", 1)[1]
-    feedback_path = Path(run_dir) / "feedback_brush.png"
-    feedback_path.write_bytes(base64.b64decode(payload))
-    return feedback_path
-```
-
-- [ ] **Step 4: Add `/api/feedback` route**
-
-In `AppHandler.do_POST`, replace the route check with:
-
-```python
-        if self.path == "/api/run":
-            try:
-                payload = handle_run(self)
-            except Exception as exc:
-                self._send_json({"ok": False, "error": str(exc)}, status=500)
-                return
-            self._send_json({"ok": True, **payload})
-            return
-
-        if self.path == "/api/feedback":
-            try:
-                payload = handle_feedback(self)
-            except Exception as exc:
-                self._send_json({"ok": False, "error": str(exc)}, status=500)
-                return
-            self._send_json({"ok": True, **payload})
-            return
-
-        self.send_error(404)
-```
-
-Add `handle_feedback`:
-
-```python
-def handle_feedback(handler):
-    length = int(handler.headers.get("Content-Length", "0"))
-    payload = json.loads(handler.rfile.read(length).decode("utf-8"))
-    run_dir = (ROOT / payload["run_dir"]).resolve()
-    output_root = OUTPUT_ROOT.resolve()
-    if output_root not in run_dir.parents and run_dir != output_root:
-        raise ValueError("Invalid run_dir")
-
-    feedback_text = payload.get("feedback_text", "").strip()
-    feedback_brush_path = save_feedback_brush(run_dir, payload.get("feedback_brush", ""))
-
-    previous_state_path = run_dir / "iteration_0" / "graph_state.json"
-    previous_state = json.loads(previous_state_path.read_text(encoding="utf-8"))
-
-    from graph_workflow import run_graph
-    from providers.vision import MockVisionProvider
-
-    state = run_graph(
-        target_image_path=previous_state["target_image_path"],
-        description=previous_state["description"],
-        reference_annotation_path=previous_state.get("reference_annotation_path"),
-        output_root=run_dir.parent,
-        existing_run_dir=run_dir,
-        feedback_brush_path=feedback_brush_path,
-        feedback_text=feedback_text,
-        provider=MockVisionProvider(),
-        unit=previous_state.get("unit", "pixel"),
-        max_iterations=2,
-    )
-    run_dir = Path(state["run_dir"])
-    result = state_to_result(state)
-    return {
-        "run_dir": str(run_dir.relative_to(ROOT)),
-        "files": build_file_links(ROOT, run_dir, result),
-        "result": result,
-    }
-```
-
-- [ ] **Step 5: Extract `state_to_result`**
-
-In `ui/app.py`, add:
-
-```python
-def state_to_result(state):
-    return {
-        "defect_type": state["strategy"]["defect_type"],
-        "measurement_type": state["strategy"]["measurement_type"],
-        "unit": state["measurements"]["summary"]["unit"],
-        "status": state["status"],
-        "results": state["measurements"]["results"],
-        "summary": state["measurements"]["summary"],
-        "segmentation": state.get("segmentation", {}),
-        "metrics": state.get("metrics", {}),
-        "notes": state["strategy"].get("notes", []),
-        "conversation": state.get("conversation", []),
-        "latest_iteration": state.get("iteration", 0),
-        "latest_annotated_image": state.get("annotated_image_path"),
-        "latest_mask": state.get("predicted_mask_path"),
-    }
-```
-
-Then in `handle_run`, keep using the `result` returned by `run_from_paths` for now. A later cleanup can share this converter with `agent.py`.
-
-- [ ] **Step 6: Run feedback helper test**
+- [ ] **Step 3: Run all UI-related tests**
 
 Run:
 
 ```bash
-pytest tests/test_feedback_payload.py tests/test_ui_handlers.py -v
+pytest tests/test_gradio_adapters.py tests/test_gradio_app.py tests/test_gradio_callbacks.py -v
 ```
 
-Expected: tests pass.
+Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add ui/app.py tests/test_feedback_payload.py
-git commit -m "feat: add feedback rerun API"
+git add tests/test_gradio_callbacks.py
+git commit -m "test: cover Gradio feedback callbacks"
 ```
 
 ---
@@ -1605,7 +1663,6 @@ Run the UI:
 python3 -m ui.app
 ```
 ```
-```
 
 - [ ] **Step 2: Run all tests**
 
@@ -1625,7 +1682,7 @@ Run:
 python3 -m ui.app
 ```
 
-Expected: server prints a local URL such as `http://127.0.0.1:7860` or the existing app port.
+Expected: Gradio prints a local URL such as `http://127.0.0.1:7860`.
 
 - [ ] **Step 4: Manual smoke test**
 
@@ -1634,8 +1691,8 @@ Use a small image with one bright defect region:
 1. Upload the target image.
 2. Enter `找亮色残留，量面积和数量`.
 3. Run the agent.
-4. Confirm an annotated image and mask appear in the chat.
-5. Draw a feedback mark and enter `这里漏了`.
+4. Confirm an annotated image, predicted mask, table, strategy JSON, and output files appear.
+5. Use the Gradio `ImageEditor` to draw a feedback mark and enter `这里漏了`.
 6. Confirm a new result message appears.
 
 - [ ] **Step 5: Commit**

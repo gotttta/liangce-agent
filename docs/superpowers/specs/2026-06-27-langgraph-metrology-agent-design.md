@@ -26,8 +26,9 @@ add framework complexity for its own sake.
   provided.
 - User feedback through brush annotation plus text description.
 - Multi-round rerun after feedback.
-- Codex-like conversational UI: concise assistant messages in the foreground and
-  detailed experiment records in the background.
+- Gradio Blocks conversational UI: concise assistant messages in the foreground,
+  ImageEditor brush feedback in the workspace, and detailed experiment records
+  in the background.
 - SAM/SAM2 segmentation backend interface reserved for future work.
 
 ### Out of Scope For V1
@@ -90,7 +91,8 @@ V1 uses the effect-first Agent MVP:
    strategy.
 4. OpenCV/skimage executes the strategy to produce a predicted mask.
 5. The measurement layer computes count, area, bounding boxes, and area ratio.
-6. The UI presents a Codex-like explanation, annotated image, mask, and results.
+6. The Gradio UI presents a Codex-like explanation, annotated image, mask, and
+   results.
 7. The user can draw on the result image and add feedback text.
 8. LangGraph routes the feedback into a new strategy generation step and reruns
    the algorithm.
@@ -251,12 +253,15 @@ the deterministic image pipeline performs the measurement.
 
 ## 10. UI Design
 
-The interface should feel like a Codex-like agent workspace instead of a static
-form.
+The interface should be built with Gradio Blocks and should feel like a
+Codex-like agent workspace instead of a static form. Gradio is preferred over a
+custom HTML/JavaScript frontend for V1 because `Chatbot`, `Image`, `ImageEditor`,
+`Dataframe`, `JSON`, `File`, and `State` cover the required interaction pattern
+with less frontend code.
 
 ### Layout
 
-Left side: conversation.
+Left side: Gradio `Chatbot` plus text composer.
 
 - User natural-language requests and feedback.
 - Agent observations.
@@ -267,15 +272,16 @@ Left side: conversation.
 Center: image workspace.
 
 - Original image, annotated image, and mask views.
-- Brush annotation on the latest annotated image.
+- Gradio `ImageEditor` for brush annotation on the latest annotated image.
 - Per-iteration result switching.
 
 Right side: structured results.
 
-- Current strategy summary.
-- Count and area table.
-- Optional IoU, count error, and area error.
-- Run history and export links.
+- `JSON` for current strategy summary.
+- `Dataframe` for count and area table.
+- `JSON` for optional IoU, count error, and area error.
+- `File` outputs for annotated image, mask, measurements, strategy, and graph
+  state.
 
 ### Interaction
 
