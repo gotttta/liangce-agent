@@ -1,6 +1,23 @@
 from pathlib import Path
 import os
 
+
+def _with_localhost_no_proxy(value):
+    entries = [entry.strip() for entry in (value or "").split(",") if entry.strip()]
+    for host in ("127.0.0.1", "localhost"):
+        if host not in entries:
+            entries.append(host)
+    return ",".join(entries)
+
+
+def configure_gradio_environment():
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+    os.environ["NO_PROXY"] = _with_localhost_no_proxy(os.getenv("NO_PROXY"))
+    os.environ["no_proxy"] = _with_localhost_no_proxy(os.getenv("no_proxy"))
+
+
+configure_gradio_environment()
+
 import gradio as gr
 
 from graph_workflow import run_graph
@@ -137,18 +154,25 @@ def build_app():
             fn=run_initial,
             inputs=[target_image, description, reference_annotation, unit],
             outputs=run_outputs,
+            show_api=False,
         )
         feedback_button.click(
             fn=run_feedback,
             inputs=[app_state, feedback_editor, description],
             outputs=run_outputs,
+            show_api=False,
         )
 
     return app
 
 
 def launch_kwargs():
-    kwargs = {"server_name": "127.0.0.1"}
+    kwargs = {
+        "server_name": "127.0.0.1",
+        "show_api": False,
+        "share": False,
+        "show_error": True,
+    }
     port = os.getenv("GRADIO_SERVER_PORT")
     if port:
         kwargs["server_port"] = int(port)
