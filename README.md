@@ -11,10 +11,21 @@ The current version is a LangGraph-based agent MVP:
 - supports optional same-image reference annotation metrics
 - provides a Gradio conversational workspace with brush feedback
 
-Local development uses a mock vision provider by default, so it does not call a
-remote model unless the provider is switched in code or configuration.
+Runtime uses the Alibaba Cloud multimodal model configured in `.env`. The test
+suite still uses a mock provider so tests do not spend tokens or require network
+access.
 
 ## Run
+
+Create `.env` in the project root:
+
+```bash
+DASHSCOPE_API_KEY="your-api-key"
+ALIYUN_BASE_URL="your-openai-compatible-url"
+ALIYUN_VISION_MODEL="qwen3.7-plus"
+```
+
+`ALIYUN_API_KEY` can be used instead of `DASHSCOPE_API_KEY`.
 
 ```bash
 python3 main.py \
@@ -47,16 +58,16 @@ The agent mode uses a LangGraph state flow:
 prepare_inputs -> vision_strategy -> segment_defects -> measure_defects -> render_outputs
 ```
 
-By default, local development uses `MockVisionProvider`, so it does not call a
-remote model. To use Alibaba Cloud's OpenAI-compatible endpoint, set:
+By default, the runtime calls Alibaba Cloud's OpenAI-compatible endpoint. Set:
 
 ```bash
 export DASHSCOPE_API_KEY="your-api-key"
-export ALIYUN_VISION_MODEL="qwen-vl-max-latest"
+export ALIYUN_BASE_URL="your-openai-compatible-url"
+export ALIYUN_VISION_MODEL="qwen3.7-plus"
 ```
 
-The model name is configurable because available model names can vary by account
-and region.
+The default model is `qwen3.7-plus`. If the API key or base URL is missing, the
+agent fails fast instead of falling back to a local mock.
 
 Run tests:
 

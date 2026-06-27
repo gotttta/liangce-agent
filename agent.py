@@ -3,17 +3,18 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 
+from providers.vision import build_runtime_provider
+
 
 def run(args):
     from graph_workflow import run_graph
-    from providers.vision import MockVisionProvider
 
     state = run_graph(
         target_image_path=args.target,
         description=args.description,
         reference_annotation_path=args.reference,
         output_root=args.output_root,
-        provider=MockVisionProvider(),
+        provider=build_runtime_provider(),
         unit=args.unit,
     )
     return Path(state["run_dir"]), state_to_output(state)

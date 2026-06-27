@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image
 
 from ui.app import run_feedback, run_initial
+from providers.vision import MockVisionProvider
 
 
 def test_run_initial_returns_chat_images_table_and_state(tmp_path, monkeypatch):
@@ -13,6 +14,7 @@ def test_run_initial_returns_chat_images_table_and_state(tmp_path, monkeypatch):
     Image.fromarray(image, mode="L").save(target)
 
     monkeypatch.setattr("ui.app.OUTPUT_ROOT", tmp_path / "outputs")
+    monkeypatch.setattr("ui.app.build_runtime_provider", lambda: MockVisionProvider())
 
     chat, annotated, mask, editor_bg, rows, strategy, metrics, files, state = run_initial(
         str(target),
@@ -38,6 +40,7 @@ def test_run_feedback_appends_second_iteration(tmp_path, monkeypatch):
     image[8:14, 9:15] = 180
     Image.fromarray(image, mode="L").save(target)
     monkeypatch.setattr("ui.app.OUTPUT_ROOT", tmp_path / "outputs")
+    monkeypatch.setattr("ui.app.build_runtime_provider", lambda: MockVisionProvider())
 
     *_, state = run_initial(str(target), "找亮色残留，量面积和数量", None, "pixel")
     feedback_image = np.zeros((24, 24, 4), dtype=np.uint8)

@@ -6,6 +6,39 @@ from pathlib import Path
 from agent_types import normalize_strategy
 
 
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ALIYUN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_ALIYUN_VISION_MODEL = "qwen3.7-plus"
+
+
+def load_env_file(path=None):
+    env_path = Path(path or ROOT / ".env")
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def build_runtime_provider(env_path=None):
+    load_env_file(env_path)
+    api_key = os.getenv("ALIYUN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    base_url = os.getenv("ALIYUN_BASE_URL")
+    if not api_key or not base_url:
+        raise ValueError(
+            "Missing Alibaba Cloud vision configuration. "
+            "Please set DASHSCOPE_API_KEY or ALIYUN_API_KEY, and ALIYUN_BASE_URL in .env."
+        )
+    return AliyunVisionProvider(api_key=api_key, base_url=base_url)
+
+
 class MockVisionProvider:
     def create_strategy(
         self,
@@ -39,8 +72,8 @@ class MockVisionProvider:
 class AliyunVisionProvider:
     def __init__(self, api_key=None, base_url=None, model=None):
         self.api_key = api_key or os.getenv("ALIYUN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
-        self.base_url = base_url or os.getenv("ALIYUN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        self.model = model or os.getenv("ALIYUN_VISION_MODEL", "qwen-vl-max-latest")
+        self.base_url = base_url or os.getenv("ALIYUN_BASE_URL", DEFAULT_ALIYUN_BASE_URL)
+        self.model = model or os.getenv("ALIYUN_VISION_MODEL", DEFAULT_ALIYUN_VISION_MODEL)
         if not self.api_key:
             raise ValueError("Missing ALIYUN_API_KEY or DASHSCOPE_API_KEY")
 

@@ -10,7 +10,7 @@ from core.measurement.evaluation import evaluate_prediction
 from core.preprocessing import load_grayscale
 from core.segmentation import segment_with_strategy
 from core.visualization import save_annotated_image, save_mask_image
-from providers.vision import MockVisionProvider
+from providers.vision import build_runtime_provider
 
 
 def run_graph(
@@ -26,7 +26,7 @@ def run_graph(
     existing_run_dir=None,
     initial_iteration=0,
 ):
-    graph = build_graph(provider=provider or MockVisionProvider(), max_iterations=max_iterations)
+    graph = build_graph(provider=provider or build_runtime_provider(), max_iterations=max_iterations)
     initial_state = {
         "target_image_path": str(target_image_path),
         "description": description,

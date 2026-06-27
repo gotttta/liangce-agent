@@ -21,7 +21,7 @@ configure_gradio_environment()
 import gradio as gr
 
 from graph_workflow import run_graph
-from providers.vision import MockVisionProvider
+from providers.vision import build_runtime_provider
 from ui.gradio_adapters import (
     measurement_rows,
     output_files,
@@ -45,7 +45,7 @@ def run_initial(target_image, description, reference_annotation, unit):
         description=description,
         reference_annotation_path=reference_annotation,
         output_root=OUTPUT_ROOT,
-        provider=MockVisionProvider(),
+        provider=build_runtime_provider(),
         unit=unit or "pixel",
     )
     return gradio_outputs(state)
@@ -68,7 +68,7 @@ def run_feedback(app_state, feedback_editor, feedback_text):
         initial_iteration=next_iteration,
         feedback_brush_path=feedback_brush_path,
         feedback_text=feedback_text,
-        provider=MockVisionProvider(),
+        provider=build_runtime_provider(),
         unit=app_state.get("unit", "pixel"),
         max_iterations=next_iteration + 1,
     )
