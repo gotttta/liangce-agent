@@ -27,6 +27,9 @@ ALIYUN_VISION_MODEL="qwen3.7-plus"
 
 `ALIYUN_API_KEY` can be used instead of `DASHSCOPE_API_KEY`.
 
+The `.env` file is ignored by git and should not be committed. Keep API keys
+only in your local `.env`.
+
 ```bash
 python3 main.py \
   --target path/to/target.png \
@@ -39,7 +42,7 @@ Optional same-image reference annotation:
 python3 main.py \
   --reference path/to/reference.png \
   --target path/to/target.png \
-  --description "bridge defect, measure area and gap"
+  --description "bright residue defect, measure area and count"
 ```
 
 ## Web UI
