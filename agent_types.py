@@ -19,6 +19,9 @@ class AgentState(TypedDict, total=False):
     run_history: list[dict]
     status: str
     errors: list[str]
+    unit: str
+    segmentation: dict
+    _mask_array: object
 
 
 def default_strategy():
