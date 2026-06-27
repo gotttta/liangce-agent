@@ -1,2 +1,8 @@
 numpy
 Pillow
+opencv-python-headless
+scikit-image
+langgraph
+openai
+gradio
+pytest

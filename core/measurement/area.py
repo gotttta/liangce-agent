@@ -39,12 +39,15 @@ def measure_components(mask, min_area=20, unit="pixel"):
             component_id += 1
 
     total_area = int(sum(item["area"] for item in results))
+    image_area = int(mask.size)
+    area_ratio = round(total_area / image_area, 6) if image_area else 0.0
     return {
         "results": results,
         "summary": {
             "count": len(results),
             "total_area": total_area,
             "unit": unit,
+            "area_ratio": area_ratio,
         },
     }
 
