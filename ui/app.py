@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import gradio as gr
 
@@ -146,8 +147,16 @@ def build_app():
     return app
 
 
+def launch_kwargs():
+    kwargs = {"server_name": "127.0.0.1"}
+    port = os.getenv("GRADIO_SERVER_PORT")
+    if port:
+        kwargs["server_port"] = int(port)
+    return kwargs
+
+
 def main():
-    build_app().launch(server_name="127.0.0.1", server_port=7860)
+    build_app().launch(**launch_kwargs())
 
 
 if __name__ == "__main__":
