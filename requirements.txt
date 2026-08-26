@@ -4,6 +4,6 @@ opencv-python-headless
 scikit-image
 langgraph
 openai
-gradio
+gradio<6
 huggingface-hub<1.0
 pytest

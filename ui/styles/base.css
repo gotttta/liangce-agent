@@ -1,0 +1,22 @@
+:root {
+  --codex-sidebar: #f7f7f5;
+  --codex-hover: #ececea;
+  --codex-active: #e7e7e4;
+  --codex-border: #e5e5e2;
+  --codex-ink: #1f1f1f;
+  --codex-muted: #737373;
+  --codex-success: #22a06b;
+  --codex-warning: #b7791f;
+  --sidebar-width: 260px;
+  --chat-max-width: 780px;
+  --composer-max-width: 720px;
+  --message-radius: 18px;
+  --panel-radius: 12px;
+}
+
+body, .gradio-container { background: #fff !important; }
+.gradio-container { max-width: none !important; min-height: 100vh; padding: 0 !important; }
+#annotation-shell { height: 100vh; min-height: 100vh; max-height: 100vh; gap: 0 !important; align-items: stretch; overflow: hidden; }
+#annotation-main { min-width: 0 !important; height: 100vh; min-height: 0 !important; max-height: 100vh; padding: 0 !important; background: #fff !important; overflow: hidden; display: flex !important; flex-direction: column !important; gap: 0 !important; }
+button, input, textarea, select { letter-spacing: 0; }
+footer { display: none !important; }

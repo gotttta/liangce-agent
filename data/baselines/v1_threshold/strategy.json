@@ -1,0 +1,20 @@
+{
+  "name": "v1_global_bright_threshold",
+  "version": 1,
+  "segmentation": {
+    "method": "bright_threshold",
+    "sensitivity": 1.8,
+    "min_area_px": 20,
+    "max_area_px": null,
+    "morphology": "open_then_close"
+  },
+  "measurement": {
+    "metrics": [
+      "count",
+      "area",
+      "bbox",
+      "area_ratio"
+    ],
+    "unit": "pixel"
+  }
+}

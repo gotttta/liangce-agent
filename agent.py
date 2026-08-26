@@ -3,19 +3,19 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 
+from core.agent_graph import run_agent_graph
 from providers.vision import build_runtime_provider
 
 
 def run(args):
-    from graph_workflow import run_graph
-
-    state = run_graph(
+    provider = build_runtime_provider()
+    state = run_agent_graph(
         target_image_path=args.target,
         description=args.description,
-        reference_annotation_path=args.reference,
         output_root=args.output_root,
-        provider=build_runtime_provider(),
         unit=args.unit,
+        provider=provider,
+        reference_examples=[{"image_path": path, "description": "甲方Handbook标注示例图"} for path in (args.reference or [])],
     )
     return Path(state["run_dir"]), state_to_output(state)
 
@@ -29,7 +29,13 @@ def state_to_output(state):
         "results": state["measurements"]["results"],
         "summary": state["measurements"]["summary"],
         "segmentation": state.get("segmentation", {}),
-        "metrics": state.get("metrics", {}),
+        "pipeline": state.get("pipeline", {}),
+        "quality_report": state.get("quality_report", {}),
+        "selected_candidate": state.get("selected_candidate"),
+        "agent_status": state.get("agent_status"),
+        "decision": state.get("decision", {}),
+        "review": state.get("review", {}),
+        "trajectory": state.get("trajectory", []),
         "notes": state["strategy"].get("notes", []),
         "conversation": state.get("conversation", []),
         "latest_iteration": state.get("iteration", 0),
@@ -42,7 +48,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="DRAM defect metrology MVP runner")
     parser.add_argument("--target", required=True, help="Path to the unannotated target/wafer image")
     parser.add_argument("--description", required=True, help="Natural language defect description")
-    parser.add_argument("--reference", help="Optional handbook/reference image path")
+    parser.add_argument(
+        "--reference",
+        action="append",
+        help="Handbook annotated example image; repeat for multiple few-shot references",
+    )
     parser.add_argument("--unit", default="pixel", help="Metrology unit, defaults to pixel")
     parser.add_argument("--output-root", default="outputs", help="Directory for run outputs")
     return parser.parse_args()
@@ -52,7 +62,7 @@ def run_from_paths(target, description, reference=None, unit="pixel", output_roo
     args = SimpleNamespace(
         target=target,
         description=description,
-        reference=reference,
+        reference=reference if isinstance(reference, list) else ([reference] if reference else []),
         unit=unit,
         output_root=output_root,
     )

@@ -1,0 +1,149 @@
+{
+  "baseline_id": "v1-threshold-2026-07",
+  "purpose": "Deterministic comparison point before v2 operator development.",
+  "strategy_file": "data/baselines/v1_threshold/strategy.json",
+  "observations_file": "data/baselines/v1_threshold/observations.md",
+  "known_limitations": [
+    "Global brightness cannot distinguish normal bright periodic lines from defects.",
+    "Image borders and scale bars are not excluded before segmentation.",
+    "The saved mask contains components below min_area_px while measurements filter them out.",
+    "The baseline has no periodic-background model or semantic defect understanding."
+  ],
+  "samples": [
+    {
+      "sample": "data/samples/in_film_particle_left_pattern.jpg",
+      "source_sha256": "3b0f91711644727ff9154bd7f28be6de5e76b29c4e74d8309daa45f66b8eaae0",
+      "mask_sha256": "447f560b50e9d08c50a3117e0fc71671e33ccb943697630cd33b0666f8eb5aff",
+      "contour_sha256": "beddb5d258b6ea9151c39fac032f6e0cb35f705111f63309df80da330fadfe43",
+      "summary": {
+        "count": 29,
+        "total_area": 837,
+        "unit": "pixel",
+        "area_ratio": 0.007706
+      },
+      "segmentation": {
+        "selected": "bright",
+        "method": "bright_threshold",
+        "mean": 84.30003356933594,
+        "std": 60.08839797973633,
+        "threshold": 192.45914993286135,
+        "coverage": 0.024654986696618454
+      },
+      "elapsed_ms": 392.025,
+      "artifacts": {
+        "mask": "data/baselines/v1_threshold/in_film_particle_left_pattern/mask.png",
+        "contour": "data/baselines/v1_threshold/in_film_particle_left_pattern/result_contour.png",
+        "measurements": "data/baselines/v1_threshold/in_film_particle_left_pattern/measurements.json",
+        "segmentation": "data/baselines/v1_threshold/in_film_particle_left_pattern/segmentation.json"
+      }
+    },
+    {
+      "sample": "data/samples/in_film_particle_middle_defect.jpg",
+      "source_sha256": "720da66a9cb46ed413db5d655778a819cd620f54adcf048641e23a9d4f13ca3a",
+      "mask_sha256": "06fbe844a0bb8d4fb226c227ea8f5ff618e62c52fc90c09064d4d573ece7f95a",
+      "contour_sha256": "3bbab1ef795f80d9f348882d693fafcbc613498653c3bd373ee09aff636921e8",
+      "summary": {
+        "count": 1,
+        "total_area": 10935,
+        "unit": "pixel",
+        "area_ratio": 0.092577
+      },
+      "segmentation": {
+        "selected": "bright",
+        "method": "bright_threshold",
+        "mean": 88.91007995605469,
+        "std": 70.18470764160156,
+        "threshold": 215.2425537109375,
+        "coverage": 0.0928393640258047
+      },
+      "elapsed_ms": 46.18,
+      "artifacts": {
+        "mask": "data/baselines/v1_threshold/in_film_particle_middle_defect/mask.png",
+        "contour": "data/baselines/v1_threshold/in_film_particle_middle_defect/result_contour.png",
+        "measurements": "data/baselines/v1_threshold/in_film_particle_middle_defect/measurements.json",
+        "segmentation": "data/baselines/v1_threshold/in_film_particle_middle_defect/segmentation.json"
+      }
+    },
+    {
+      "sample": "data/samples/in_film_particle_middle_defect_tight.jpg",
+      "source_sha256": "d0f75e36a1137cf9273300c791e5f26ce1d19671a9e419e69a1003ad8210f86e",
+      "mask_sha256": "b743bbc12bd540e4fdbcdef6216cf8168759ece1cbf115e8339ed5b683c652b9",
+      "contour_sha256": "cf7af616d8a2f033ee06e333af0692b76939a9d4fe1aad999a81879a95bda3db",
+      "summary": {
+        "count": 3,
+        "total_area": 147,
+        "unit": "pixel",
+        "area_ratio": 0.008247
+      },
+      "segmentation": {
+        "selected": "bright",
+        "method": "bright_threshold",
+        "mean": 71.91293334960938,
+        "std": 46.176239013671875,
+        "threshold": 155.03016357421876,
+        "coverage": 0.021654978962131838
+      },
+      "elapsed_ms": 6.316,
+      "artifacts": {
+        "mask": "data/baselines/v1_threshold/in_film_particle_middle_defect_tight/mask.png",
+        "contour": "data/baselines/v1_threshold/in_film_particle_middle_defect_tight/result_contour.png",
+        "measurements": "data/baselines/v1_threshold/in_film_particle_middle_defect_tight/measurements.json",
+        "segmentation": "data/baselines/v1_threshold/in_film_particle_middle_defect_tight/segmentation.json"
+      }
+    },
+    {
+      "sample": "data/samples/in_film_particle_right_defect_tight.jpg",
+      "source_sha256": "26612fd9ea13cd4d5093b85f0a6fa0e095425313dbfa8b1c947ddaf484fb502f",
+      "mask_sha256": "b150819eba1146df67f0f5a68b67f4addbb3e2b2f6e4e12c14191d7208dec12f",
+      "contour_sha256": "111f9a6e20a44e40f28f3038fe102216209b0044f7959b4a5fe1fde6313c06ea",
+      "summary": {
+        "count": 11,
+        "total_area": 2542,
+        "unit": "pixel",
+        "area_ratio": 0.053742
+      },
+      "segmentation": {
+        "selected": "bright",
+        "method": "bright_threshold",
+        "mean": 115.68145751953125,
+        "std": 61.11894226074219,
+        "threshold": 225.6955535888672,
+        "coverage": 0.053847780126849897
+      },
+      "elapsed_ms": 16.793,
+      "artifacts": {
+        "mask": "data/baselines/v1_threshold/in_film_particle_right_defect_tight/mask.png",
+        "contour": "data/baselines/v1_threshold/in_film_particle_right_defect_tight/result_contour.png",
+        "measurements": "data/baselines/v1_threshold/in_film_particle_right_defect_tight/measurements.json",
+        "segmentation": "data/baselines/v1_threshold/in_film_particle_right_defect_tight/segmentation.json"
+      }
+    },
+    {
+      "sample": "data/samples/in_film_particle_right_zoom.jpg",
+      "source_sha256": "966cc66b7d63f64f0323afe97d973c7d40e82f759c122a8d7088a61368069cfe",
+      "mask_sha256": "357d2a27a2983065dc994d553dfb8d24c7001b9ed7a1d2fbffaebfabc6efd454",
+      "contour_sha256": "48576f230aed4f3bf7101597eac0a79587ca829516fe0dff89d360a379b2fd99",
+      "summary": {
+        "count": 19,
+        "total_area": 9530,
+        "unit": "pixel",
+        "area_ratio": 0.057052
+      },
+      "segmentation": {
+        "selected": "bright",
+        "method": "bright_threshold",
+        "mean": 92.01663970947266,
+        "std": 49.10556411743164,
+        "threshold": 180.40665512084962,
+        "coverage": 0.05735153256704981
+      },
+      "elapsed_ms": 57.73,
+      "artifacts": {
+        "mask": "data/baselines/v1_threshold/in_film_particle_right_zoom/mask.png",
+        "contour": "data/baselines/v1_threshold/in_film_particle_right_zoom/result_contour.png",
+        "measurements": "data/baselines/v1_threshold/in_film_particle_right_zoom/measurements.json",
+        "segmentation": "data/baselines/v1_threshold/in_film_particle_right_zoom/segmentation.json"
+      }
+    }
+  ]
+}

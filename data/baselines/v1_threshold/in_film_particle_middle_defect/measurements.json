@@ -1,0 +1,25 @@
+{
+  "results": [
+    {
+      "id": 1,
+      "area": 10935,
+      "bbox": [
+        0,
+        0,
+        286,
+        413
+      ],
+      "width": 286,
+      "height": 413,
+      "aspect_ratio": 0.6925,
+      "unit": "pixel",
+      "confidence": 0.5
+    }
+  ],
+  "summary": {
+    "count": 1,
+    "total_area": 10935,
+    "unit": "pixel",
+    "area_ratio": 0.092577
+  }
+}

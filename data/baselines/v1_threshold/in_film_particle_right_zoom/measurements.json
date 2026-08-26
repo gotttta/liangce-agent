@@ -1,0 +1,295 @@
+{
+  "results": [
+    {
+      "id": 1,
+      "area": 104,
+      "bbox": [
+        13,
+        53,
+        25,
+        6
+      ],
+      "width": 25,
+      "height": 6,
+      "aspect_ratio": 4.1667,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 2,
+      "area": 277,
+      "bbox": [
+        44,
+        54,
+        70,
+        7
+      ],
+      "width": 70,
+      "height": 7,
+      "aspect_ratio": 10.0,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 3,
+      "area": 23,
+      "bbox": [
+        133,
+        54,
+        8,
+        5
+      ],
+      "width": 8,
+      "height": 5,
+      "aspect_ratio": 1.6,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 4,
+      "area": 81,
+      "bbox": [
+        224,
+        54,
+        21,
+        6
+      ],
+      "width": 21,
+      "height": 6,
+      "aspect_ratio": 3.5,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 5,
+      "area": 55,
+      "bbox": [
+        148,
+        55,
+        18,
+        4
+      ],
+      "width": 18,
+      "height": 4,
+      "aspect_ratio": 4.5,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 6,
+      "area": 22,
+      "bbox": [
+        176,
+        55,
+        9,
+        4
+      ],
+      "width": 9,
+      "height": 4,
+      "aspect_ratio": 2.25,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 7,
+      "area": 39,
+      "bbox": [
+        189,
+        55,
+        12,
+        4
+      ],
+      "width": 12,
+      "height": 4,
+      "aspect_ratio": 3.0,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 8,
+      "area": 127,
+      "bbox": [
+        256,
+        55,
+        31,
+        6
+      ],
+      "width": 31,
+      "height": 6,
+      "aspect_ratio": 5.1667,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 9,
+      "area": 23,
+      "bbox": [
+        300,
+        55,
+        9,
+        4
+      ],
+      "width": 9,
+      "height": 4,
+      "aspect_ratio": 2.25,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 10,
+      "area": 68,
+      "bbox": [
+        311,
+        55,
+        17,
+        5
+      ],
+      "width": 17,
+      "height": 5,
+      "aspect_ratio": 3.4,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 11,
+      "area": 53,
+      "bbox": [
+        347,
+        55,
+        16,
+        5
+      ],
+      "width": 16,
+      "height": 5,
+      "aspect_ratio": 3.2,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 12,
+      "area": 80,
+      "bbox": [
+        375,
+        55,
+        21,
+        5
+      ],
+      "width": 21,
+      "height": 5,
+      "aspect_ratio": 4.2,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 13,
+      "area": 64,
+      "bbox": [
+        398,
+        55,
+        17,
+        5
+      ],
+      "width": 17,
+      "height": 5,
+      "aspect_ratio": 3.4,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 14,
+      "area": 2836,
+      "bbox": [
+        112,
+        128,
+        174,
+        46
+      ],
+      "width": 174,
+      "height": 46,
+      "aspect_ratio": 3.7826,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 15,
+      "area": 22,
+      "bbox": [
+        122,
+        179,
+        8,
+        5
+      ],
+      "width": 8,
+      "height": 5,
+      "aspect_ratio": 1.6,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 16,
+      "area": 5379,
+      "bbox": [
+        70,
+        198,
+        183,
+        66
+      ],
+      "width": 183,
+      "height": 66,
+      "aspect_ratio": 2.7727,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 17,
+      "area": 26,
+      "bbox": [
+        7,
+        251,
+        10,
+        3
+      ],
+      "width": 10,
+      "height": 3,
+      "aspect_ratio": 3.3333,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 18,
+      "area": 30,
+      "bbox": [
+        19,
+        251,
+        11,
+        4
+      ],
+      "width": 11,
+      "height": 4,
+      "aspect_ratio": 2.75,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 19,
+      "area": 221,
+      "bbox": [
+        254,
+        251,
+        16,
+        21
+      ],
+      "width": 16,
+      "height": 21,
+      "aspect_ratio": 0.7619,
+      "unit": "pixel",
+      "confidence": 0.5
+    }
+  ],
+  "summary": {
+    "count": 19,
+    "total_area": 9530,
+    "unit": "pixel",
+    "area_ratio": 0.057052
+  }
+}

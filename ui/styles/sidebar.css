@@ -1,0 +1,24 @@
+#annotation-sidebar {
+  width: var(--sidebar-width) !important; min-width: var(--sidebar-width) !important; flex: 0 0 var(--sidebar-width) !important;
+  padding: 10px !important; color: var(--codex-ink); background: var(--codex-sidebar) !important;
+  border: 0 !important; border-right: 1px solid var(--codex-border) !important; border-radius: 0 !important; overflow-y: auto;
+}
+#annotation-brand { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 4px 5px 10px; }
+#annotation-brand .brand-mark { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid #d6d6d2; border-radius: 6px; background: #fff; color: #202020; font-size: 10px; font-weight: 700; }
+#annotation-brand h1 { margin: 0; color: var(--codex-ink); font-size: 13px; line-height: 1.2; }
+#annotation-brand p { margin: 2px 0 0; color: var(--codex-muted); font-size: 10px; }
+#annotation-sidebar .block, #annotation-sidebar .form, #annotation-sidebar .wrap { border-color: var(--codex-border) !important; box-shadow: none !important; }
+#annotation-sidebar .form { background: transparent !important; border: 0 !important; }
+#annotation-sidebar label, #annotation-sidebar .label-wrap, #annotation-sidebar span { color: #3f3f3f; }
+#annotation-sidebar input, #annotation-sidebar textarea, #annotation-sidebar .image-container, #annotation-sidebar .file-preview { background: #fff !important; }
+#annotation-new-task, #annotation-new-task button { width: 100%; min-height: 36px; justify-content: flex-start; color: var(--codex-ink) !important; background: #fff !important; border: 1px solid var(--codex-border) !important; border-radius: 6px !important; font-size: 12px; font-weight: 600; }
+#annotation-new-task:hover, #annotation-new-task button:hover { background: var(--codex-hover) !important; }
+#annotation-task-history { margin: 8px 0 0; }
+#annotation-resume-task, #annotation-resume-task button { min-height: 32px !important; margin-top: 6px; border-radius: 7px !important; font-size: 11px !important; }
+.sidebar-group-label { padding: 20px 9px 7px; color: #898989; font-size: 10px; }
+.sidebar-nav, .sidebar-project { display: flex; align-items: center; gap: 9px; min-height: 31px; padding: 0 9px; border-radius: 5px; color: #555; font-size: 12px; }
+.sidebar-nav.active { color: var(--codex-ink); background: var(--codex-active); font-weight: 600; }
+.nav-glyph { width: 14px; color: #858585; text-align: center; }
+.project-dot, .footer-dot { width: 7px; height: 7px; border-radius: 50%; background: #a6a6a6; }
+.sidebar-spacer { min-height: 22px; }
+.sidebar-footer { display: flex; align-items: center; gap: 8px; padding: 10px 9px; border-top: 1px solid var(--codex-border); color: #8a8a8a; font-size: 10px; }

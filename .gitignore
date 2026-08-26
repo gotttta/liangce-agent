@@ -7,6 +7,8 @@ venv/
 env/
 
 outputs/
+workspace/tasks/
+workspace/algorithms/
 
 .DS_Store
 .env

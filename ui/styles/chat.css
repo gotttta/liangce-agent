@@ -1,0 +1,67 @@
+#annotation-topbar { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 18px; border-bottom: 1px solid var(--codex-border); background: #fff; }
+#annotation-topbar .title { color: var(--codex-ink); font-size: 12px; font-weight: 600; }
+#annotation-topbar .status { display: flex; align-items: center; gap: 7px; color: var(--codex-muted); font-size: 10px; }
+#annotation-topbar .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--codex-success); }
+#annotation-chat { flex: 1 1 auto; min-height: 0; padding: 0 24px !important; background: #fff !important; overflow-y: auto; overscroll-behavior: contain; position: relative; }
+#annotation-chatbot { width: min(100%, var(--chat-max-width)); margin: 0 auto; padding: 28px 0 160px; }
+#annotation-chatbot .message.bot { width: auto; max-width: 100%; padding: 2px 0; }
+#annotation-chatbot .message.user { border-radius: var(--message-radius); }
+#annotation-welcome { position: absolute; top: 28vh; left: 50%; width: min(var(--chat-max-width), calc(100% - 48px)); transform: translateX(-50%); text-align: center; pointer-events: none; }
+#annotation-welcome h2 { margin: 0 0 8px; color: var(--codex-ink); font-size: 22px; font-weight: 600; }
+#annotation-welcome p { margin: 0; color: var(--codex-muted); font-size: 13px; }
+#annotation-results { width: min(100%, var(--chat-max-width)); margin: 0 auto; gap: 12px; }
+#annotation-measurements { width: min(100%, var(--chat-max-width)); margin: 10px auto 0; }
+#annotation-composer { position: fixed; right: 0; bottom: 0; left: 0; z-index: 20; width: min(var(--composer-max-width), calc(100% - 48px)); margin: 0 auto 18px; padding: 8px 12px 9px; border: 1px solid var(--codex-border); border-radius: 12px; background: rgba(255,255,255,.98); box-shadow: 0 4px 16px rgba(0,0,0,.06); }
+#annotation-main #annotation-composer { position: relative !important; inset: auto !important; z-index: 20; flex: 0 0 auto !important; width: min(var(--composer-max-width), calc(100% - 48px)) !important; margin: 0 auto 18px !important; }
+#annotation-next-actions { position: fixed; right: 0; bottom: 90px; left: 0; z-index: 19; width: min(var(--chat-max-width), calc(100% - 48px)); margin: 0 auto; padding: 0; background: transparent; }
+#annotation-main #annotation-next-actions { position: relative !important; inset: auto !important; z-index: 19; flex: 0 0 auto !important; width: min(var(--chat-max-width), calc(100% - 48px)) !important; margin: 0 auto 10px !important; }
+#annotation-handbook-examples, #annotation-ground-truth { position: relative; flex: 0 0 auto !important; height: 30px !important; min-height: 30px !important; margin: 0 !important; padding: 0 !important; border: 0 !important; border-radius: 6px !important; background: transparent !important; overflow: visible !important; }
+#annotation-handbook-examples { width: 129px !important; min-width: 129px !important; }
+#annotation-ground-truth { width: 117px !important; min-width: 117px !important; }
+#annotation-handbook-examples .label-wrap, #annotation-ground-truth .label-wrap { display: flex; align-items: center; min-height: 30px; padding: 0 8px; color: var(--codex-muted) !important; background: transparent !important; font-size: 11px; font-weight: 400; white-space: nowrap; }
+#annotation-handbook-examples .label-wrap:hover, #annotation-ground-truth .label-wrap:hover { background: var(--codex-hover) !important; }
+#annotation-handbook-examples > div:not(.wrap), #annotation-ground-truth > div:not(.wrap) { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30; width: 280px; padding: 8px !important; border: 1px solid var(--codex-border) !important; border-radius: 6px !important; background: #fff !important; box-shadow: 0 4px 16px rgba(0,0,0,.1); }
+#annotation-handbook-examples button[aria-label="Click to upload or drop files"], #annotation-ground-truth button[aria-label="Click to upload or drop files"] { min-height: 72px; }
+#annotation-handbook-examples .file-preview, #annotation-handbook-examples .upload-container, #annotation-ground-truth .file-preview, #annotation-ground-truth .upload-container { min-height: 0 !important; }
+#annotation-prompt textarea { min-height: 30px !important; max-height: 72px !important; padding: 4px 2px !important; border: 0 !important; box-shadow: none !important; background: transparent !important; font-size: 14px; }
+#annotation-prompt, #annotation-prompt .form, #annotation-prompt .wrap, #annotation-prompt .container { min-height: 0 !important; padding: 0 !important; border: 0 !important; box-shadow: none !important; }
+#annotation-composer-row { align-items: center; gap: 6px; min-height: 30px; flex-wrap: nowrap !important; }
+#annotation-composer-row > .form { flex: 1 1 auto !important; min-width: 0 !important; }
+#annotation-composer-row #annotation-prompt { flex: 1 1 auto !important; min-width: 0 !important; }
+#annotation-attach, #annotation-send { flex: 0 0 32px !important; width: 32px !important; min-width: 32px !important; min-height: 30px; border-radius: 6px !important; font-size: 12px; }
+#annotation-attach { padding: 0 !important; color: #5b5b5b !important; background: transparent !important; border: 0 !important; }
+#annotation-send { padding: 0 !important; color: #fff !important; background: var(--codex-ink) !important; border-color: var(--codex-ink) !important; }
+.task-card { margin: 16px 0; padding: 16px 20px; border: 1px solid var(--codex-border); border-radius: var(--panel-radius); background: #fafafa; }
+.task-card-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; font-size: 13px; font-weight: 600; }
+.task-card-status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+.task-card-metrics { display: flex; gap: 28px; color: var(--codex-muted); font-size: 12px; }
+.task-card-metrics strong { color: var(--codex-ink); font-size: 18px; }
+.task-card-evaluation { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--codex-border); color: var(--codex-muted); font-size: 11px; }
+.task-card-evaluation .evaluation-label { color: var(--codex-ink); font-weight: 600; }
+.task-card-evaluation strong { color: var(--codex-ink); font-size: 13px; }
+.progress-card { margin: 14px 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.progress-card summary { display: flex; align-items: center; gap: 7px; cursor: pointer; color: var(--codex-ink); font-size: 13px; font-weight: 600; list-style: none; }
+.progress-card summary::-webkit-details-marker { display: none; }
+.progress-summary-mark { display: inline-grid; width: 18px; height: 18px; place-items: center; color: #707070; font-size: 18px; line-height: 1; }
+.progress-state { margin-left: 2px; color: var(--codex-muted); font-size: 11px; font-weight: 400; }
+.progress-steps { margin: 8px 0 0 8px; padding: 1px 0 1px 15px; border-left: 1px solid #e3e3e0; color: var(--codex-muted); font-size: 12px; line-height: 1.45; }
+.activity-row { display: flex; align-items: baseline; gap: 8px; min-height: 25px; padding: 2px 0; color: #656565; }
+.activity-label { color: #555; white-space: nowrap; }
+.activity-meta { color: #9a9a9a; font-size: 11px; white-space: nowrap; }
+.activity-detail { min-width: 0; overflow: hidden; color: #8a8a8a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-completed .activity-label { color: #777; }
+.activity-failed .activity-label { color: #b42318; }
+.activity-icon { position: relative; display: inline-block; flex: 0 0 14px; width: 14px; height: 14px; color: #7d7d7d; }
+.activity-icon::before { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; line-height: 14px; }
+.icon-check::before { content: "✓"; color: #777; }
+.icon-error::before { content: "×"; color: #b42318; font-size: 16px; }
+.icon-pending::before { content: "·"; color: #858585; font-size: 22px; }
+.icon-thinking::before { content: "◌"; color: #858585; }
+.icon-read::before { content: "▤"; }
+.icon-edit::before { content: "✎"; }
+.icon-command::before { content: ">_"; font-size: 9px; font-weight: 700; }
+.icon-search::before { content: "⌕"; font-size: 17px; }
+.icon-model::before { content: "✦"; font-size: 13px; }
+.icon-tool::before { content: "⌘"; }
+.activity-detail code { color: #6f6f6f; font-size: 11px; }
+@media (max-width: 640px) { .activity-detail { display: none; } .progress-steps { margin-left: 2px; } }

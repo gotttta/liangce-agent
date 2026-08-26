@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "outline5",
+  "description": "Five-image development regression set for user-specified contour extraction.",
+  "root": "../../..",
+  "samples": [
+    {
+      "id": "elliptical_nanohole_a",
+      "scene": "outline",
+      "image": "data/samples/outline/01_elliptical_nanohole_array_sem_a.jpg",
+      "ground_truth": "data/annotations/01_elliptical_nanohole_array_sem_a_mask.png",
+      "target": "提取主图中用户指定的椭圆结构轮廓，排除文字、白边和比例尺"
+    },
+    {
+      "id": "elliptical_nanohole_b",
+      "scene": "outline",
+      "image": "data/samples/outline/01_elliptical_nanohole_array_sem_b.jpg",
+      "ground_truth": "data/annotations/01_elliptical_nanohole_array_sem_b_mask.png",
+      "target": "提取主图中黑灰色椭圆结构轮廓，排除文字、白边和比例尺"
+    },
+    {
+      "id": "triangular_elliptical_holes",
+      "scene": "outline",
+      "image": "data/samples/outline/04_triangular_elliptical_hole_array_sem.jpg",
+      "ground_truth": "data/annotations/04_triangular_elliptical_hole_array_sem_mask.png",
+      "target": "提取主成像区域内用户指定的孔洞轮廓，排除底部仪器信息栏"
+    },
+    {
+      "id": "film_left_pattern",
+      "scene": "outline",
+      "image": "data/samples/outline/in_film_particle_left_pattern.jpg",
+      "ground_truth": "data/annotations/in_film_particle_left_pattern_mask.png",
+      "target": "提取主成像区域内用户指定目标的轮廓，排除顶部色条和底部比例尺"
+    },
+    {
+      "id": "film_middle_defect",
+      "scene": "outline",
+      "image": "data/samples/outline/in_film_particle_middle_defect.jpg",
+      "ground_truth": "data/annotations/in_film_particle_middle_defect_mask.png",
+      "target": "提取主成像区域内用户指定目标的轮廓，排除底部比例尺"
+    }
+  ]
+}

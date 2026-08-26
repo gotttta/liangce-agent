@@ -1,0 +1,22 @@
+@media (max-width: 820px) {
+  #annotation-shell { display: block !important; }
+  #annotation-sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 200; width: 280px !important; min-width: 280px !important; transform: translateX(-100%); transition: transform .3s ease; }
+  #annotation-sidebar.open { transform: translateX(0); }
+  #annotation-main { width: 100% !important; height: 100vh; }
+  #annotation-chat { padding: 0 10px !important; }
+  #annotation-composer { width: calc(100% - 20px); margin-bottom: max(10px, env(safe-area-inset-bottom)); }
+  #annotation-feedback-canvas { right: 10px; left: 10px; width: auto !important; top: 60px; bottom: 10px; transform: translateY(110%); }
+  #annotation-feedback-canvas.visible, #annotation-feedback-canvas[style*="display: block"] { transform: translateY(0); }
+}
+
+@media (max-width: 480px) {
+  #annotation-handbook-examples { width: 54px !important; min-width: 54px !important; }
+  #annotation-ground-truth { width: 46px !important; min-width: 46px !important; }
+  #annotation-handbook-examples .label-wrap, #annotation-ground-truth .label-wrap { padding: 0 4px; }
+  #annotation-handbook-examples .label-wrap > span:first-child, #annotation-ground-truth .label-wrap > span:first-child { display: none; }
+  #annotation-handbook-examples .label-wrap::before { content: "示例"; }
+  #annotation-ground-truth .label-wrap::before { content: "GT"; }
+  #annotation-handbook-examples > div:not(.wrap), #annotation-ground-truth > div:not(.wrap) { width: calc(100vw - 20px); }
+  #annotation-handbook-examples > div:not(.wrap) { left: -48px; }
+  #annotation-ground-truth > div:not(.wrap) { left: -108px; }
+}

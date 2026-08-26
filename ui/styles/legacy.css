@@ -1,0 +1,980 @@
+:root {
+    --codex-sidebar: #f7f7f5;
+    --codex-hover: #ececea;
+    --codex-active: #e7e7e4;
+    --codex-border: #e5e5e2;
+    --codex-ink: #1f1f1f;
+    --codex-muted: #737373;
+}
+
+body,
+.gradio-container {
+    background: #ffffff !important;
+}
+
+.gradio-container {
+    max-width: none !important;
+    min-height: 100vh;
+    padding: 0 !important;
+}
+
+#annotation-shell {
+    height: 100vh;
+    min-height: 100vh;
+    max-height: 100vh;
+    gap: 0 !important;
+    align-items: stretch;
+    overflow: hidden;
+}
+
+#annotation-sidebar {
+    width: 260px !important;
+    min-width: 260px !important;
+    flex: 0 0 260px !important;
+    padding: 10px 10px 12px !important;
+    color: var(--codex-ink);
+    background: var(--codex-sidebar) !important;
+    border: 0 !important;
+    border-right: 1px solid var(--codex-border) !important;
+    border-radius: 0 !important;
+    overflow-y: auto;
+}
+
+#annotation-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 40px;
+    padding: 4px 5px 10px;
+}
+
+#annotation-brand .brand-mark {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 1px solid #d6d6d2;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #202020;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+#annotation-brand h1 {
+    margin: 0;
+    color: var(--codex-ink);
+    font-size: 13px;
+    line-height: 1.2;
+    letter-spacing: 0;
+}
+
+#annotation-brand p {
+    margin: 2px 0 0;
+    color: var(--codex-muted);
+    font-size: 10px;
+}
+
+.sidebar-section-title {
+    padding: 15px 7px 6px;
+    color: #858585;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+#annotation-sidebar .block,
+#annotation-sidebar .form,
+#annotation-sidebar .wrap {
+    border-color: var(--codex-border) !important;
+    box-shadow: none !important;
+}
+
+#annotation-sidebar .form {
+    background: transparent !important;
+    border: 0 !important;
+}
+
+#annotation-sidebar label,
+#annotation-sidebar .label-wrap,
+#annotation-sidebar span {
+    color: #3f3f3f;
+}
+
+#annotation-sidebar .image-container,
+#annotation-sidebar .file-preview {
+    background: #ffffff !important;
+}
+
+#annotation-sidebar input,
+#annotation-sidebar textarea {
+    color: var(--codex-ink) !important;
+    background: #ffffff !important;
+}
+
+#annotation-sidebar button.secondary,
+#annotation-sidebar .secondary {
+    color: #343434 !important;
+    background: #ffffff !important;
+    border-color: var(--codex-border) !important;
+}
+
+#annotation-task-history {
+    margin: 8px 0 0;
+}
+
+#annotation-task-history .wrap,
+#annotation-task-history .form {
+    background: #ffffff !important;
+}
+
+#annotation-resume-task,
+#annotation-resume-task button {
+    min-height: 32px !important;
+    margin-top: 6px;
+    border-radius: 7px !important;
+    font-size: 11px !important;
+}
+
+#annotation-mode label {
+    min-height: 32px;
+    border: 0 !important;
+    border-radius: 5px !important;
+    background: transparent !important;
+}
+
+#annotation-mode,
+#annotation-mode > div,
+#annotation-mode .wrap,
+#annotation-mode .form,
+#annotation-sidebar .file-preview {
+    color: #3f3f3f !important;
+    background: transparent !important;
+    border-color: var(--codex-border) !important;
+}
+
+#annotation-sidebar .label-wrap {
+    color: #777777 !important;
+    background: #f1f1ef !important;
+}
+
+#annotation-sidebar .block.padded {
+    color: #3f3f3f !important;
+    background: transparent !important;
+    border-color: transparent !important;
+}
+
+#annotation-mode label.selected {
+    color: var(--codex-ink) !important;
+    background: var(--codex-active) !important;
+    border-color: transparent !important;
+}
+
+#annotation-sidebar #annotation-save,
+#annotation-sidebar #annotation-save button {
+    min-height: 36px;
+    margin-top: 8px;
+    color: #ffffff !important;
+    background: #1f1f1f !important;
+    border-color: #1f1f1f !important;
+    border-radius: 6px !important;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#annotation-sidebar #annotation-save:hover,
+#annotation-sidebar #annotation-save button:hover {
+    background: #343434 !important;
+    border-color: #343434 !important;
+}
+
+#annotation-summary {
+    min-height: 28px;
+    padding: 7px 4px 0;
+    color: var(--codex-muted);
+    font-size: 11px;
+}
+
+#annotation-main {
+    min-width: 0 !important;
+    height: 100vh;
+    min-height: 0 !important;
+    max-height: 100vh;
+    padding: 0 !important;
+    background: #ffffff !important;
+    overflow: hidden;
+}
+
+#annotation-main {
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    gap: 0 !important;
+}
+
+#annotation-chat {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0 24px !important;
+    background: #ffffff !important;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    position: relative;
+}
+
+#annotation-chatbot {
+    height: 100% !important;
+    min-height: 0 !important;
+    max-width: 780px;
+    margin: 0 auto;
+    border: 0 !important;
+    background: transparent !important;
+}
+
+#annotation-chatbot .bubble-wrap {
+    gap: 18px !important;
+    padding: 24px 0 28px !important;
+}
+
+#annotation-chatbot .message-wrap {
+    margin: 0 !important;
+}
+
+#annotation-chatbot .message-row.bot-row {
+    width: 100% !important;
+    max-width: 680px !important;
+    margin-right: auto !important;
+}
+
+#annotation-chatbot .message-row.user-row {
+    justify-content: flex-end !important;
+}
+
+#annotation-chatbot .flex-wrap.bot {
+    width: 100% !important;
+    max-width: 680px !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+#annotation-chatbot .flex-wrap.user {
+    width: auto !important;
+    max-width: min(560px, 78%) !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+#annotation-chatbot .message {
+    max-width: min(680px, 88%) !important;
+    padding: 8px 12px !important;
+    border-radius: 18px !important;
+    font-size: 14px !important;
+    line-height: 1.65 !important;
+    letter-spacing: 0 !important;
+}
+
+#annotation-chatbot .message.bot:not(.image) {
+    width: min(680px, 100%) !important;
+    max-width: min(680px, 100%) !important;
+    padding: 2px 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+#annotation-chatbot .message.user {
+    display: inline-block !important;
+    width: max-content !important;
+    min-width: 112px !important;
+    max-width: 100% !important;
+    padding-right: 14px !important;
+    padding-left: 14px !important;
+    border: 0 !important;
+    background: #f4f4f4 !important;
+    box-shadow: none !important;
+}
+
+#annotation-chatbot .message p,
+#annotation-chatbot .message li,
+#annotation-chatbot .message span,
+#annotation-chatbot .message strong {
+    font-size: inherit !important;
+    line-height: inherit !important;
+}
+
+#annotation-chatbot .message p {
+    margin: 0 0 7px !important;
+}
+
+#annotation-chatbot .message p:last-child {
+    margin-bottom: 0 !important;
+}
+
+#annotation-chatbot .message ul,
+#annotation-chatbot .message ol {
+    margin: 5px 0 8px !important;
+    padding-left: 22px !important;
+}
+
+#annotation-chatbot .message li {
+    margin: 3px 0 !important;
+}
+
+#annotation-chatbot .message h1,
+#annotation-chatbot .message h2,
+#annotation-chatbot .message h3,
+#annotation-chatbot .message h4 {
+    margin: 10px 0 4px !important;
+    font-size: 14px !important;
+    line-height: 1.5 !important;
+    font-weight: 650 !important;
+}
+
+#annotation-chat:has(#annotation-chatbot .message) #annotation-welcome {
+    display: none;
+}
+
+#annotation-chatbot .message.bot.image {
+    width: min(300px, 82%) !important;
+    max-width: min(300px, 82%) !important;
+    padding: 0 !important;
+    background: transparent !important;
+}
+
+#annotation-chatbot .message.bot.image > button,
+#annotation-chatbot .message.bot.image .image-container,
+#annotation-chatbot .message.bot.image .image-frame {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+}
+
+#annotation-chatbot .message.bot.image img {
+    display: block;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: 220px !important;
+    object-fit: contain !important;
+    border: 1px solid var(--codex-border);
+    border-radius: 8px;
+    cursor: zoom-in;
+}
+
+#annotation-results {
+    width: min(780px, 100%);
+    margin: 8px auto 12px;
+    gap: 10px;
+}
+
+#annotation-results .block {
+    min-width: 0 !important;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+#annotation-measurements {
+    width: min(780px, 100%);
+    margin: 0 auto 12px;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 8px !important;
+}
+
+#annotation-next-actions {
+    position: fixed !important;
+    right: 0;
+    bottom: 90px;
+    left: 0;
+    z-index: 19;
+    width: min(780px, calc(100% - 48px));
+    margin: 0 auto;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    gap: 3px !important;
+}
+
+#annotation-next-actions .next-action-title {
+    margin: 0 0 8px;
+    color: var(--codex-ink);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#annotation-next-actions .next-action-note {
+    display: none;
+}
+
+#annotation-next-actions .next-action-row {
+    justify-content: flex-start !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+}
+
+#annotation-next-actions button {
+    min-width: 0 !important;
+    min-height: 34px;
+    padding: 0 14px !important;
+    border-color: #ddddda !important;
+    border-radius: 17px !important;
+    background: #ffffff !important;
+    color: #343434 !important;
+    font-size: 12px;
+    box-shadow: none !important;
+}
+
+#annotation-next-actions .primary-action-row button {
+    min-height: 34px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+#annotation-next-actions #annotation-accept {
+    flex: 0 0 190px !important;
+    width: 190px !important;
+}
+
+#annotation-next-actions #annotation-continue {
+    flex: 0 0 120px !important;
+    width: 120px !important;
+}
+
+#annotation-next-actions #annotation-exit {
+    flex: 0 0 78px !important;
+    width: 78px !important;
+}
+
+#annotation-next-actions .artifact-action-row {
+    margin-top: 1px;
+}
+
+#annotation-next-actions .artifact-action-row button {
+    min-height: 22px;
+    border: 0 !important;
+    background: transparent !important;
+    color: var(--codex-muted) !important;
+    font-size: 10px;
+}
+
+#annotation-next-actions #annotation-accept,
+#annotation-next-actions #annotation-accept button {
+    background: #1f1f1f !important;
+    border-color: #1f1f1f !important;
+    color: #ffffff !important;
+}
+
+#annotation-next-actions #annotation-exit,
+#annotation-next-actions #annotation-exit button {
+    color: #777777 !important;
+}
+
+#annotation-welcome {
+    position: absolute;
+    z-index: 1;
+    top: 18vh;
+    right: 18px;
+    left: 18px;
+    max-width: 780px;
+    margin: 0 auto;
+    color: var(--codex-ink);
+    text-align: center;
+}
+
+#annotation-welcome h2 {
+    margin: 0 0 8px;
+    font-size: 23px;
+    font-weight: 600;
+}
+
+#annotation-welcome p {
+    margin: 0;
+    color: var(--codex-muted);
+    font-size: 13px;
+}
+
+#annotation-composer {
+    position: fixed !important;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    width: min(720px, calc(100% - 48px));
+    margin: 0 auto 18px;
+    padding: 8px 12px !important;
+    border: 1px solid #d8d8d5 !important;
+    border-radius: 22px !important;
+    background: rgba(255, 255, 255, 0.98) !important;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06) !important;
+    gap: 2px !important;
+}
+
+#annotation-tool-drawer {
+    width: min(720px, calc(100% - 48px));
+    margin: 0 auto 14px;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 8px !important;
+    background: #ffffff !important;
+}
+
+#annotation-tool-drawer > .label-wrap {
+    min-height: 38px;
+    color: #3f3f3f !important;
+    background: #ffffff !important;
+}
+
+#annotation-tool-drawer > .wrap,
+#annotation-tool-drawer .block,
+#annotation-tool-drawer .form,
+#annotation-tool-drawer .padded {
+    border-color: var(--codex-border) !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+}
+
+#annotation-tool-note {
+    margin: 0 4px 10px;
+    color: var(--codex-muted);
+    font-size: 11px;
+}
+
+#annotation-tool-drawer input[type="checkbox"],
+#annotation-tool-drawer input[type="radio"] {
+    accent-color: #1f1f1f;
+}
+
+#annotation-prompt textarea {
+    min-height: 30px !important;
+    max-height: 72px !important;
+    padding: 4px 2px !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    font-size: 14px;
+}
+
+#annotation-prompt,
+#annotation-prompt .form,
+#annotation-prompt .wrap,
+#annotation-prompt .container {
+    min-height: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+#annotation-attachment-label {
+    min-height: 0;
+    margin: 0;
+    color: var(--codex-muted);
+    font-size: 11px;
+}
+
+#annotation-attachment-label:empty {
+    display: none;
+}
+
+#annotation-attachment-row {
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+}
+
+#annotation-attachment-row #annotation-attachment-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#annotation-attachment-view,
+#annotation-attachment-clear {
+    flex: 0 0 auto;
+    min-height: 24px !important;
+    padding: 2px 8px !important;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 4px !important;
+    background: #ffffff !important;
+    color: var(--codex-text) !important;
+    font-size: 11px !important;
+}
+
+#annotation-attachment-clear {
+    color: #b42318 !important;
+}
+
+#annotation-attachment-preview {
+    max-height: 220px;
+    margin: 4px 0 8px;
+    border: 1px solid var(--codex-border);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+#annotation-composer-row {
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    flex-wrap: nowrap !important;
+}
+
+#annotation-composer-row #annotation-composer-spacer {
+    flex: 1 1 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+}
+
+#annotation-attach,
+#annotation-send {
+    flex: 0 0 32px !important;
+    flex-grow: 0 !important;
+    flex-shrink: 0 !important;
+    width: 32px !important;
+    min-width: 32px !important;
+    max-width: 32px !important;
+    min-height: 30px;
+    border-radius: 6px !important;
+    font-size: 12px;
+}
+
+#annotation-attach {
+    width: 30px;
+    padding: 0 !important;
+    color: #5b5b5b !important;
+    background: transparent !important;
+    border: 0 !important;
+}
+
+#annotation-send {
+    width: 32px;
+    padding: 0 !important;
+    color: #ffffff !important;
+    background: #1f1f1f !important;
+    border-color: #1f1f1f !important;
+}
+
+#annotation-canvas-tool {
+    margin: 10px 0 0;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 6px !important;
+    background: #ffffff !important;
+}
+
+#annotation-canvas-tool .label-wrap {
+    color: #555555 !important;
+    background: #fbfbfa !important;
+}
+
+button[aria-label="Webcam button"],
+button[aria-label="Capture from camera"] {
+    display: none !important;
+}
+
+#annotation-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 52px;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--codex-border);
+    background: #ffffff;
+}
+
+#annotation-topbar .title {
+    color: var(--codex-ink);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#annotation-topbar .status {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--codex-muted);
+    font-size: 10px;
+}
+
+#annotation-topbar .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #22a06b;
+}
+
+#annotation-canvas-wrap {
+    padding: 16px 18px 10px !important;
+}
+
+#annotation-editor {
+    overflow: hidden;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 6px !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+}
+
+#annotation-editor .image-container {
+    min-height: 690px !important;
+    background: #fafafa !important;
+}
+
+#annotation-output {
+    margin: 0 18px 18px;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 6px !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+}
+
+#annotation-sidebar input[type="checkbox"],
+#annotation-sidebar input[type="radio"] {
+    accent-color: #1f1f1f;
+}
+
+#annotation-sidebar .file-preview {
+    margin-top: 8px;
+}
+
+#annotation-output .image-container {
+    min-height: 220px !important;
+}
+
+#annotation-sidebar {
+    width: 236px !important;
+    min-width: 236px !important;
+    flex-basis: 236px !important;
+    padding: 12px 10px !important;
+}
+
+#annotation-sidebar .sidebar-action {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 10px;
+    border: 1px solid var(--codex-border);
+    border-radius: 6px;
+    background: #ffffff;
+    color: var(--codex-ink);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#annotation-new-task,
+#annotation-new-task button {
+    width: 100%;
+    min-height: 36px;
+    justify-content: flex-start;
+    padding: 0 10px !important;
+    color: var(--codex-ink) !important;
+    background: #ffffff !important;
+    border: 1px solid var(--codex-border) !important;
+    border-radius: 6px !important;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#annotation-new-task:hover,
+#annotation-new-task button:hover {
+    background: var(--codex-hover) !important;
+}
+
+#annotation-sidebar .sidebar-group-label {
+    padding: 20px 9px 7px;
+    color: #898989;
+    font-size: 10px;
+}
+
+#annotation-sidebar .sidebar-nav,
+#annotation-sidebar .sidebar-project {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 31px;
+    padding: 0 9px;
+    border-radius: 5px;
+    color: #555555;
+    font-size: 12px;
+}
+
+#annotation-sidebar .sidebar-nav.active {
+    color: var(--codex-ink);
+    background: var(--codex-active);
+    font-weight: 600;
+}
+
+#annotation-sidebar .nav-glyph {
+    width: 14px;
+    color: #858585;
+    text-align: center;
+}
+
+#annotation-sidebar .project-dot,
+#annotation-sidebar .footer-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #a6a6a6;
+}
+
+#annotation-sidebar .sidebar-spacer {
+    min-height: 22px;
+}
+
+#annotation-sidebar .sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 9px;
+    border-top: 1px solid var(--codex-border);
+    color: #8a8a8a;
+    font-size: 10px;
+}
+
+#annotation-inspector {
+    width: 286px !important;
+    min-width: 286px !important;
+    flex: 0 0 286px !important;
+    padding: 0 14px 18px !important;
+    border-left: 1px solid var(--codex-border) !important;
+    background: #fbfbfa !important;
+}
+
+#annotation-inspector .inspector-title {
+    min-height: 52px;
+    margin: 0 -14px;
+    padding: 17px 15px;
+    border-bottom: 1px solid var(--codex-border);
+    color: var(--codex-ink);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#annotation-inspector .inspector-note {
+    margin: 0 2px 14px;
+    color: var(--codex-muted);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+#annotation-inspector .inspector-section {
+    padding: 18px 2px 7px;
+    color: #858585;
+    font-size: 10px;
+}
+
+#annotation-inspector .block,
+#annotation-inspector .form,
+#annotation-inspector .wrap,
+#annotation-inspector .padded {
+    border-color: var(--codex-border) !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+
+#annotation-inspector .image-container,
+#annotation-inspector .file-preview {
+    background: #ffffff !important;
+}
+
+#annotation-inspector label,
+#annotation-inspector .label-wrap,
+#annotation-inspector span {
+    color: #3f3f3f;
+}
+
+#annotation-inspector .label-wrap {
+    color: #777777 !important;
+    background: #f1f1ef !important;
+}
+
+#annotation-inspector input[type="checkbox"],
+#annotation-inspector input[type="radio"] {
+    accent-color: #1f1f1f;
+}
+
+#annotation-inspector #annotation-save,
+#annotation-inspector #annotation-save button {
+    min-height: 36px;
+    margin-top: 10px;
+    color: #ffffff !important;
+    background: #1f1f1f !important;
+    border-color: #1f1f1f !important;
+    border-radius: 6px !important;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#annotation-inspector #annotation-summary {
+    min-height: 26px;
+    padding-left: 2px;
+}
+
+footer {
+    display: none !important;
+}
+
+@media (max-width: 820px) {
+    #annotation-shell {
+        display: block !important;
+        height: 100vh;
+        min-height: 100vh;
+        max-height: 100vh;
+    }
+
+    #annotation-sidebar {
+        display: none !important;
+    }
+
+    #annotation-inspector {
+        width: 100% !important;
+        min-width: 0 !important;
+        flex: 0 0 auto !important;
+        border-top: 1px solid var(--codex-border) !important;
+        border-left: 0 !important;
+    }
+
+    #annotation-brand {
+        padding-bottom: 10px;
+    }
+
+    #annotation-main {
+        display: flex !important;
+        flex-direction: column !important;
+        height: 100vh;
+        max-height: 100vh;
+        width: 100% !important;
+        min-width: 0 !important;
+        overflow: hidden;
+    }
+
+    #annotation-canvas-wrap {
+        padding: 10px !important;
+    }
+
+    #annotation-editor .image-container {
+        min-height: 460px !important;
+    }
+
+    #annotation-output {
+        margin: 0 10px 10px;
+    }
+
+    #annotation-tool-drawer,
+    #annotation-composer {
+        width: calc(100% - 20px);
+    }
+
+    #annotation-composer {
+        margin-bottom: max(10px, env(safe-area-inset-bottom));
+    }
+
+    #annotation-welcome {
+        top: 14vh;
+        margin-top: 0;
+    }
+}

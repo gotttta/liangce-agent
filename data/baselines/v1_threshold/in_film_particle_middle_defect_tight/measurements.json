@@ -1,0 +1,55 @@
+{
+  "results": [
+    {
+      "id": 1,
+      "area": 23,
+      "bbox": [
+        79,
+        40,
+        6,
+        7
+      ],
+      "width": 6,
+      "height": 7,
+      "aspect_ratio": 0.8571,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 2,
+      "area": 84,
+      "bbox": [
+        18,
+        63,
+        6,
+        22
+      ],
+      "width": 6,
+      "height": 22,
+      "aspect_ratio": 0.2727,
+      "unit": "pixel",
+      "confidence": 0.5
+    },
+    {
+      "id": 3,
+      "area": 40,
+      "bbox": [
+        58,
+        99,
+        10,
+        13
+      ],
+      "width": 10,
+      "height": 13,
+      "aspect_ratio": 0.7692,
+      "unit": "pixel",
+      "confidence": 0.5
+    }
+  ],
+  "summary": {
+    "count": 3,
+    "total_area": 147,
+    "unit": "pixel",
+    "area_ratio": 0.008247
+  }
+}

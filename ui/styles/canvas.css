@@ -1,0 +1,12 @@
+#annotation-feedback-canvas { position: fixed !important; inset: 80px 24px 24px auto !important; z-index: 100; width: 380px !important; max-height: none !important; margin: 0 !important; padding: 16px !important; overflow: auto; visibility: hidden; pointer-events: none; border: 1px solid var(--codex-border) !important; border-radius: var(--panel-radius) !important; background: #fff !important; box-shadow: 0 8px 24px rgba(0,0,0,.12) !important; opacity: 0; transform: translateX(420px) !important; transition: opacity .18s ease, transform .3s cubic-bezier(.4,0,.2,1), visibility 0s linear .3s; }
+#annotation-feedback-canvas.feedback-open { visibility: visible; pointer-events: auto; opacity: 1; transform: translateX(0) !important; transition-delay: 0s; }
+#annotation-feedback-canvas .feedback-canvas-note { margin: 0 0 10px; color: var(--codex-muted); font-size: 12px; line-height: 1.5; }
+#annotation-feedback-editor, #annotation-green-feedback-editor { max-height: none; overflow: hidden; border: 1px solid var(--codex-border) !important; border-radius: 10px !important; background: #fafafa !important; }
+#annotation-feedback-editor { margin-bottom: 12px; }
+#annotation-feedback-editor .image-container, #annotation-green-feedback-editor .image-container { min-height: 210px !important; max-height: 260px !important; background: #fafafa !important; }
+#annotation-feedback-controls { justify-content: flex-end !important; gap: 8px; margin-top: 10px; }
+#annotation-clear-feedback, #annotation-cancel-feedback, #annotation-submit-feedback { min-height: 32px !important; border-radius: 7px !important; font-size: 11px !important; }
+#annotation-submit-feedback { color: #fff !important; background: var(--codex-ink) !important; border-color: var(--codex-ink) !important; }
+#annotation-next-actions { width: min(100%, var(--chat-max-width)); margin: 12px auto; padding: 16px 20px; border: 1px solid var(--codex-border) !important; border-radius: var(--panel-radius) !important; background: #fafafa !important; }
+#annotation-next-actions .next-action-title { font-size: 13px; font-weight: 600; }
+#annotation-next-actions .next-action-note { margin: 4px 0 12px; color: var(--codex-muted); font-size: 11px; }

@@ -1,27 +1,4 @@
 from copy import deepcopy
-from typing import Optional, TypedDict
-
-
-class AgentState(TypedDict, total=False):
-    target_image_path: str
-    description: str
-    reference_annotation_path: Optional[str]
-    run_dir: str
-    iteration: int
-    strategy: dict
-    predicted_mask_path: str
-    annotated_image_path: str
-    measurements: dict
-    metrics: dict
-    feedback_brush_path: Optional[str]
-    feedback_text: Optional[str]
-    conversation: list[dict]
-    run_history: list[dict]
-    status: str
-    errors: list[str]
-    unit: str
-    segmentation: dict
-    _mask_array: object
 
 
 def default_strategy():

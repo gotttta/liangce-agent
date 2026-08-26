@@ -1,0 +1,8 @@
+{
+  "selected": "bright",
+  "method": "bright_threshold",
+  "mean": 71.91293334960938,
+  "std": 46.176239013671875,
+  "threshold": 155.03016357421876,
+  "coverage": 0.021654978962131838
+}
