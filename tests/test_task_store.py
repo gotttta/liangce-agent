@@ -1,4 +1,5 @@
 import json
+import pytest
 from pathlib import Path
 
 from core.task_store import TaskStore, save_rejection_record
@@ -124,3 +125,16 @@ def test_accepting_algorithm_does_not_publish_generated_operator(tmp_path):
     )
     assert approved["approval"]["user_tested"] is True
     assert store.operator_library.list_operators()[0]["name"] == "candidate_mask"
+
+def test_delete_task_removes_directory(tmp_path):
+    store = TaskStore(tmp_path / "tasks")
+    task = store.create_task()
+    assert (tmp_path / "tasks" / task["id"]).exists()
+
+    assert store.delete_task(task["id"]) == task["id"]
+
+    with pytest.raises(FileNotFoundError):
+        store.task_dir(task["id"])
+    # 越出任务根目录的 id 一律拒绝，防止路径穿越删除。
+    with pytest.raises(FileNotFoundError):
+        store.delete_task("../escape")

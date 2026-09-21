@@ -3,6 +3,17 @@ import numpy as np
 from core.measurement.area import measure_components
 
 
+GROUND_TRUTH_GATE = {"dice": 0.85, "recall": 0.90, "precision": 0.85, "boundary_f1": 0.80}
+
+
+def meets_ground_truth_gate(evaluation):
+    """Use the same objective gate for execution stopping and graph review."""
+    return bool(evaluation and evaluation.get("status") == "ok" and all(
+        np.isfinite(evaluation.get(key, 0.0)) and float(evaluation.get(key, 0.0)) >= threshold
+        for key, threshold in GROUND_TRUTH_GATE.items()
+    ) and evaluation.get("count_error", 0) == 0)
+
+
 def evaluate_prediction(
     predicted_mask,
     reference_mask,

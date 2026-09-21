@@ -12,7 +12,7 @@ def build_graph(provider=None, max_iterations=2):
     """Compatibility alias for callers that used the historical graph API."""
     return build_agent_graph(
         provider=provider or build_runtime_provider(),
-        max_candidates=3,
+        max_candidates=1,
         checkpointer=False,
     )
 
@@ -38,7 +38,7 @@ def run_graph(
         reference_annotation_path=reference_annotation_path,
         reference_examples=reference_examples,
         unit=unit,
-        max_candidates=3,
+        max_candidates=1,
         provider=provider or build_runtime_provider(),
         previous_state={
             "iteration": initial_iteration - 1,

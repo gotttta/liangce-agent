@@ -203,6 +203,61 @@ def periodic_background_residual(image, background, mode="absolute"):
     )
 
 
+def build_periodic_background(image, period, harmonic="auto", max_harmonic=3):
+    """V3 multi-input wrapper using a period-estimation artifact."""
+    if not isinstance(period, MetadataArtifact):
+        raise TypeError("period must be a MetadataArtifact")
+    data = period.data
+    axis = data.get("axis")
+    period_px = data.get("period_px")
+    if period_px is None:
+        raise ValueError("period estimation did not find a usable period")
+    return periodic_background_model(
+        image,
+        axis=axis,
+        period_px=period_px,
+        harmonic=harmonic,
+        max_harmonic=max_harmonic,
+    )
+
+
+def subtract_periodic_background(image, background, mode="absolute"):
+    """V3 multi-input wrapper for periodic residual extraction."""
+    return periodic_background_residual(image, background=background, mode=mode)
+
+
+def build_periodic_valid_mask(image, period, border_px=1, roi=None):
+    """Build the deterministic validity mask used by periodic-defect skills."""
+    if not isinstance(period, MetadataArtifact):
+        raise TypeError("period must be a MetadataArtifact")
+    period_data = period.data
+    axis = period_data.get("axis")
+    period_px = period_data.get("period_px")
+    if axis not in {"x", "y"} or not isinstance(period_px, int) or period_px < 1:
+        raise ValueError("period must contain a usable axis and period_px")
+    height, width = image.data.shape
+    edge_margin = period_px
+    if axis == "x":
+        rectangles = [[0, 0, edge_margin, height], [width - edge_margin, 0, edge_margin, height]]
+    else:
+        rectangles = [[0, 0, width, edge_margin], [0, height - edge_margin, width, edge_margin]]
+    rectangles.extend(_outside_roi_rectangles(roi, width, height))
+    result = exclude_regions(image, rectangles=rectangles, border_px=border_px)
+    metadata = {**result.metadata, "operator": "build_periodic_valid_mask", "period_px": period_px, "axis": axis}
+    return OperatorResult(MaskArtifact(result.artifact.data, metadata=metadata), metadata, result.warnings)
+
+
+def threshold_residual(image, valid_mask, method="percentile", percentile=97.0, sensitivity=3.0):
+    """V3 typed form of residual thresholding with a validity-mask input."""
+    return residual_threshold(
+        image,
+        method=method,
+        percentile=percentile,
+        sensitivity=sensitivity,
+        valid_mask=valid_mask,
+    )
+
+
 def residual_threshold(
     image,
     method="percentile",
@@ -315,6 +370,28 @@ def _phase_median_background(image, axis, period):
     return np.tile(phase_template, (repeats, 1))[:image.shape[0], :].astype(np.float32)
 
 
+def _outside_roi_rectangles(roi, image_width, image_height):
+    if roi is None:
+        return []
+    if not isinstance(roi, (list, tuple)) or len(roi) != 4:
+        raise ValueError("roi must be [x, y, width, height]")
+    x, y, width, height = (int(value) for value in roi)
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
+        raise ValueError("roi coordinates and dimensions are invalid")
+    if x + width > image_width or y + height > image_height:
+        raise ValueError("roi exceeds image bounds")
+    rectangles = []
+    if x:
+        rectangles.append([0, 0, x, image_height])
+    if x + width < image_width:
+        rectangles.append([x + width, 0, image_width - (x + width), image_height])
+    if y:
+        rectangles.append([x, 0, width, y])
+    if y + height < image_height:
+        rectangles.append([x, y + height, width, image_height - (y + height)])
+    return rectangles
+
+
 def register_image_operators(registry):
     registry.register("normalize", normalize, ImageArtifact, ImageArtifact)
     registry.register("gaussian_denoise", gaussian_denoise, ImageArtifact, ImageArtifact)
@@ -324,3 +401,35 @@ def register_image_operators(registry):
     registry.register("periodic_background_model", periodic_background_model, ImageArtifact, ImageArtifact)
     registry.register("periodic_background_residual", periodic_background_residual, ImageArtifact, ImageArtifact)
     registry.register("residual_threshold", residual_threshold, ImageArtifact, MaskArtifact)
+    registry.register(
+        "build_periodic_background",
+        build_periodic_background,
+        ImageArtifact,
+        ImageArtifact,
+        input_ports={"image": ImageArtifact, "period": MetadataArtifact},
+        legacy_allowed=False,
+    )
+    registry.register(
+        "subtract_periodic_background",
+        subtract_periodic_background,
+        ImageArtifact,
+        ImageArtifact,
+        input_ports={"image": ImageArtifact, "background": ImageArtifact},
+        legacy_allowed=False,
+    )
+    registry.register(
+        "build_periodic_valid_mask",
+        build_periodic_valid_mask,
+        ImageArtifact,
+        MaskArtifact,
+        input_ports={"image": ImageArtifact, "period": MetadataArtifact},
+        legacy_allowed=False,
+    )
+    registry.register(
+        "threshold_residual",
+        threshold_residual,
+        ImageArtifact,
+        MaskArtifact,
+        input_ports={"image": ImageArtifact, "valid_mask": MaskArtifact},
+        legacy_allowed=False,
+    )

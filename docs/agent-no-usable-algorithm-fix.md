@@ -37,7 +37,7 @@ Web 调用 [ui/annotation_app.py](../ui/annotation_app.py#L986) 时固定传入 
 - `exclude_regions`
 - `apply_valid_mask`
 
-这些算子虽然在 [core/operators/image.py](../core/operators/image.py#L111) 和其他算子模块中注册，但没有进入模型看到的 Pipeline Tool Catalog，也无法直接通过当前单输入 DSL 表达完整的周期背景流程。
+这些算子虽然在 [core/operators/image.py](../core/operators/image.py#L111) 和其他算子模块中注册，但没有进入模型看到的 Pipeline Operator Catalog，也无法直接通过当前单输入 DSL 表达完整的周期背景流程。
 
 结果是：模型知道图像有周期结构，也无法调用已验证的周期背景方案，只能在 `statistical_threshold`、`adaptive_threshold` 或 `local_background_residual` 中猜参数。
 

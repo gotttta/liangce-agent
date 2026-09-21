@@ -1,13 +1,22 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from core.pipelines.dsl import (
     execute_pipeline,
+    is_v3_pipeline,
     normalize_pipeline,
+    pin_pipeline_operator_versions,
     strategy_to_pipeline,
     validate_pipeline,
 )
 from core.quality import evaluate_mask_quality, inspect_mask_health
+
+
+def _fixture_pipeline():
+    return json.loads((Path(__file__).parent / "fixtures" / "legacy_skill.json").read_text())["pipeline_template"]
 
 
 def test_strategy_pipeline_executes_deterministically_and_produces_trace():
@@ -125,18 +134,18 @@ def test_pipeline_trace_records_mask_statistics_and_standard_warnings():
     assert "kept_components=0" in result.trace[1]["warnings"]
 
 
-def test_mask_health_rejects_empty_and_unbounded_masks_without_quality_score():
+def test_mask_health_keeps_empty_and_large_masks_as_diagnostics():
     empty = inspect_mask_health(np.zeros((10, 10), dtype=bool))
     full = inspect_mask_health(np.ones((10, 10), dtype=bool))
 
     assert empty["issues"] == ["empty_mask"]
-    assert not empty["usable_for_review"]
+    assert empty["usable_for_review"]
     assert "coverage_too_large" in full["issues"]
     border = np.zeros((10, 10), dtype=bool)
     border[[0, -1], :] = True
     border[:, [0, -1]] = True
     assert "border_dominated" in inspect_mask_health(border)["issues"]
-    assert not full["usable_for_review"]
+    assert full["usable_for_review"]
 
 
 def test_mask_health_uses_explicit_expected_count_only():
@@ -171,3 +180,147 @@ def test_periodic_builtin_pipeline_is_executable_through_common_executor():
     assert result.mask.data.shape == image.shape
     assert result.trace
     assert result.trace[-1]["operator"] == "extract_contours"
+
+
+def test_v3_dag_executes_multi_input_periodic_baseline_deterministically():
+    from core.pipelines.periodic_template import periodic_segmentation_template
+
+    height, width, period = 96, 144, 12
+    x = np.arange(width)
+    image = np.tile(55 + 30 * np.cos(2 * np.pi * x / period), (height, 1)).astype(np.float32)
+    image[35:60, 62:86] += 100
+    pipeline = periodic_segmentation_template()
+
+    first = execute_pipeline(image, pipeline)
+    second = execute_pipeline(image, pipeline)
+
+    assert is_v3_pipeline(pipeline)
+    assert np.array_equal(first.mask.data, second.mask.data)
+    assert first.mask.data[45, 72]
+    assert first.artifacts["background"].data.shape == image.shape
+    assert first.trace[2]["inputs"] == {"image": "denoised", "period": "period"}
+
+
+def test_v3_dag_rejects_type_mismatch_and_cycles():
+    type_mismatch = {
+        "schema_version": 3,
+        "nodes": [{
+            "id": "bad",
+            "operator": "morphology",
+            "inputs": {"mask": "$image"},
+            "params": {},
+        }],
+        "outputs": {"mask": "bad"},
+    }
+    with pytest.raises(ValueError, match="expects MaskArtifact"):
+        validate_pipeline(type_mismatch)
+
+    cyclic = {
+        "schema_version": 3,
+        "nodes": [
+            {"id": "a", "operator": "normalize", "inputs": {"image": "b"}, "params": {}},
+            {"id": "b", "operator": "normalize", "inputs": {"image": "a"}, "params": {}},
+            {"id": "mask", "operator": "global_threshold", "inputs": {"image": "a"}, "params": {}},
+        ],
+        "outputs": {"mask": "mask"},
+    }
+    with pytest.raises(ValueError, match="contains a cycle"):
+        validate_pipeline(cyclic)
+
+
+def test_pipeline_replay_record_pins_operator_versions():
+    pipeline = strategy_to_pipeline({"segmentation": {"min_area_px": 2}})
+    pinned = pin_pipeline_operator_versions(pipeline)
+
+    assert pinned["operator_versions"]["normalize"] == "1.0.0"
+    assert pinned["operator_versions"]["filter_components"] == "1.0.0"
+
+
+@pytest.mark.parametrize("kind", ["legacy", "v3", "builtin"])
+def test_replay_preserves_metadata_and_rejects_incompatible_versions(kind):
+
+    pipeline = {
+        "legacy": strategy_to_pipeline({}),
+        "v3": _fixture_pipeline(),
+        "builtin": {"kind": "builtin_pipeline", "name": "periodic_particle_builtin", "params": {}},
+    }[kind]
+    pinned = pin_pipeline_operator_versions(pipeline)
+    restored = normalize_pipeline(pinned)
+    assert restored == pinned
+    assert pin_pipeline_operator_versions(restored) == pinned
+    image = np.tile(np.array([0.0, 20.0, 0.0, 20.0] * 20, dtype=np.float32), (80, 1))
+    image[20:28, 30:38] += 100
+    assert np.array_equal(execute_pipeline(image, restored).mask.data, execute_pipeline(image, pinned).mask.data)
+
+    tool = next(iter(restored["operator_versions"]))
+    restored["operator_versions"][tool] = "999.0.0"
+    assert pinned["operator_versions"][tool] != "999.0.0"
+    for operation in (validate_pipeline, pin_pipeline_operator_versions, lambda value: execute_pipeline(image, value)):
+        with pytest.raises(ValueError, match="version mismatch"):
+            operation(restored)
+
+
+@pytest.mark.parametrize("versions", [None, {}, {"unknown": "1.0.0"}])
+def test_replay_rejects_incomplete_or_malformed_versions(versions):
+    pipeline = strategy_to_pipeline({})
+    pipeline["operator_versions"] = versions
+    with pytest.raises(ValueError, match="operator_versions"):
+        validate_pipeline(normalize_pipeline(pipeline))
+
+
+def test_generated_operator_version_comes_from_embedded_definition():
+    pipeline = {
+        "generated_operators": [{
+            "name": "custom_mask", "version": "2.3.0",
+            "source": "def apply(data, params):\n    return data > np.mean(data)",
+        }],
+        "steps": [{"id": "mask", "op": "custom_mask", "input": "image", "params": {}}],
+    }
+    pinned = pin_pipeline_operator_versions(pipeline)
+    assert pinned["operator_versions"]["custom_mask"] == "2.3.0"
+    assert pinned["version_provenance"] == "recorded_at_execution"
+
+
+@pytest.mark.parametrize("kind", ["legacy", "v3", "builtin"])
+def test_old_operator_field_names_replay_without_losing_version_checks(kind):
+    from copy import deepcopy
+
+    pipeline = {
+        "legacy": strategy_to_pipeline({}),
+        "v3": _fixture_pipeline(),
+        "builtin": {"kind": "builtin_pipeline", "name": "periodic_particle_builtin", "params": {}},
+    }[kind]
+    canonical = pin_pipeline_operator_versions(pipeline)
+    old = deepcopy(canonical)
+    old["tool_versions"] = old.pop("operator_versions")
+    for node in old.get("nodes", []):
+        node["tool"] = node.pop("operator")
+    original = deepcopy(old)
+    assert normalize_pipeline(old) == canonical
+    assert pin_pipeline_operator_versions(old) == canonical
+    validate_pipeline(old)
+    image = np.tile(np.array([0, 20, 0, 20] * 20, dtype=np.float32), (80, 1))
+    image[20:28, 30:38] += 100
+    assert np.array_equal(execute_pipeline(image, old).mask.data, execute_pipeline(image, canonical).mask.data)
+    assert old == original
+    old["tool_versions"][next(iter(old["tool_versions"]))] = "999.0.0"
+    for operation in (normalize_pipeline, validate_pipeline, pin_pipeline_operator_versions):
+        if operation is normalize_pipeline:
+            with pytest.raises(ValueError, match="version mismatch"):
+                validate_pipeline(operation(old))
+        else:
+            with pytest.raises(ValueError, match="version mismatch"):
+                operation(old)
+
+
+@pytest.mark.parametrize("conflict", ["node", "versions"])
+def test_conflicting_legacy_operator_fields_are_rejected(conflict):
+
+    pipeline = pin_pipeline_operator_versions(_fixture_pipeline())
+    if conflict == "node":
+        pipeline["nodes"][0]["tool"] = "median_denoise"
+    else:
+        pipeline["tool_versions"] = {}
+    for operation in (normalize_pipeline, validate_pipeline, pin_pipeline_operator_versions):
+        with pytest.raises(ValueError, match="conflicting"):
+            operation(pipeline)

@@ -1,3 +1,5 @@
+from hashlib import sha256
+from core.runtime_logging import logger
 import json
 import re
 import shutil
@@ -38,6 +40,11 @@ class TaskStore:
             algorithm_root or self.root.parent / "algorithms"
         )
         self.operator_library = OperatorLibrary(self.root.parent / "operators")
+
+    @property
+    def memory_service(self):
+        from core.memory import MemoryService
+        return MemoryService(self)
 
     def create_task(self, title="新缺陷检测任务"):
         task_id = f"task_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}"
@@ -206,13 +213,17 @@ class TaskStore:
         ground_truth_dir = task_dir / "ground_truth"
         destination = ground_truth_dir / f"{uuid4().hex[:8]}_{source.name}"
         shutil.copy2(source, destination)
-        mask_path = ground_truth_dir / "ground_truth_mask.png"
+        mask_path = ground_truth_dir / f"{uuid4().hex}_mask.png"
         save_ground_truth_mask(mask, mask_path)
+        from core.input_contract import input_identity
         ground_truth = {
+            **input_identity(target),
             "type": "same_image_ground_truth",
             "annotation_path": str(destination),
             "mask_path": str(mask_path),
             "source_name": source.name,
+            "source_upload_path": str(source),
+            "source_sha256": sha256(source.read_bytes()).hexdigest(),
             "target_image_path": str(target),
             "extraction": extraction,
             "added_at": utc_now(),
@@ -230,6 +241,15 @@ class TaskStore:
         task["updated_at"] = utc_now()
         self._write_json(self.task_dir(task_id) / "task.json", task)
         return task
+
+    def delete_task(self, task_id):
+        """Remove a task directory; unknown ids raise like load_task."""
+        task_dir = self.task_dir(task_id)
+        if task_dir.resolve().parent != self.root.resolve():
+            raise ValueError(f"Invalid task id: {task_id}")
+        shutil.rmtree(task_dir)
+        return task_id
+
 
     def save_node_result(
         self,
@@ -261,11 +281,13 @@ class TaskStore:
         task["updated_at"] = utc_now()
         self._write_json(task_dir / "task.json", task)
         self.append_event(task_id, "node_finished", record)
+        logger.info("node_saved task_id=%s node=%s status=%s duration_seconds=%.4f artifact=%s", task_id, node_name, status, float(duration_seconds), node_dir / "latest.json")
         return record
 
     def append_message(self, task_id, role, content):
         message = {"timestamp": utc_now(), "role": role, "content": content}
         self._append_jsonl(self.task_dir(task_id) / "conversation.jsonl", message)
+        self.memory_service.episode(task_id, "message", message)
         return message
 
     def append_event(self, task_id, event_type, payload):
@@ -275,6 +297,7 @@ class TaskStore:
             "payload": payload,
         }
         self._append_jsonl(self.task_dir(task_id) / "events.jsonl", event)
+        self.memory_service.episode(task_id, event_type, {"payload": payload})
         return event
 
     def accept_result(self, task_id, state, note="用户确认当前结果"):
@@ -289,6 +312,7 @@ class TaskStore:
             "rendering": state.get("rendering", {}),
         })
         published_algorithm = self.algorithm_registry.publish(task_id, state, note=note)
+        self.memory_service.publish(task_id, published_algorithm)
         acceptance = {
             "accepted_at": utc_now(),
             "note": note,
@@ -304,6 +328,10 @@ class TaskStore:
             "predicted_mask_path": state.get("predicted_mask_path"),
             "measurement_summary": state.get("measurements", {}).get("summary", {}),
             "quality_report": state.get("quality_report", {}),
+            "manual_constraints": published_algorithm.get("manual_constraints", {}),
+            "replayable_without_manual_constraints": published_algorithm.get(
+                "replayable_without_manual_constraints", True
+            ),
         }
         self._write_json(task_dir / "acceptance" / "latest.json", acceptance)
         task = self.load_task(task_id)

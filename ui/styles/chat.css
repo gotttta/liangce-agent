@@ -1,67 +1,894 @@
-#annotation-topbar { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 18px; border-bottom: 1px solid var(--codex-border); background: #fff; }
-#annotation-topbar .title { color: var(--codex-ink); font-size: 12px; font-weight: 600; }
-#annotation-topbar .status { display: flex; align-items: center; gap: 7px; color: var(--codex-muted); font-size: 10px; }
-#annotation-topbar .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--codex-success); }
-#annotation-chat { flex: 1 1 auto; min-height: 0; padding: 0 24px !important; background: #fff !important; overflow-y: auto; overscroll-behavior: contain; position: relative; }
-#annotation-chatbot { width: min(100%, var(--chat-max-width)); margin: 0 auto; padding: 28px 0 160px; }
-#annotation-chatbot .message.bot { width: auto; max-width: 100%; padding: 2px 0; }
-#annotation-chatbot .message.user { border-radius: var(--message-radius); }
-#annotation-welcome { position: absolute; top: 28vh; left: 50%; width: min(var(--chat-max-width), calc(100% - 48px)); transform: translateX(-50%); text-align: center; pointer-events: none; }
-#annotation-welcome h2 { margin: 0 0 8px; color: var(--codex-ink); font-size: 22px; font-weight: 600; }
-#annotation-welcome p { margin: 0; color: var(--codex-muted); font-size: 13px; }
-#annotation-results { width: min(100%, var(--chat-max-width)); margin: 0 auto; gap: 12px; }
-#annotation-measurements { width: min(100%, var(--chat-max-width)); margin: 10px auto 0; }
-#annotation-composer { position: fixed; right: 0; bottom: 0; left: 0; z-index: 20; width: min(var(--composer-max-width), calc(100% - 48px)); margin: 0 auto 18px; padding: 8px 12px 9px; border: 1px solid var(--codex-border); border-radius: 12px; background: rgba(255,255,255,.98); box-shadow: 0 4px 16px rgba(0,0,0,.06); }
-#annotation-main #annotation-composer { position: relative !important; inset: auto !important; z-index: 20; flex: 0 0 auto !important; width: min(var(--composer-max-width), calc(100% - 48px)) !important; margin: 0 auto 18px !important; }
-#annotation-next-actions { position: fixed; right: 0; bottom: 90px; left: 0; z-index: 19; width: min(var(--chat-max-width), calc(100% - 48px)); margin: 0 auto; padding: 0; background: transparent; }
-#annotation-main #annotation-next-actions { position: relative !important; inset: auto !important; z-index: 19; flex: 0 0 auto !important; width: min(var(--chat-max-width), calc(100% - 48px)) !important; margin: 0 auto 10px !important; }
-#annotation-handbook-examples, #annotation-ground-truth { position: relative; flex: 0 0 auto !important; height: 30px !important; min-height: 30px !important; margin: 0 !important; padding: 0 !important; border: 0 !important; border-radius: 6px !important; background: transparent !important; overflow: visible !important; }
-#annotation-handbook-examples { width: 129px !important; min-width: 129px !important; }
-#annotation-ground-truth { width: 117px !important; min-width: 117px !important; }
-#annotation-handbook-examples .label-wrap, #annotation-ground-truth .label-wrap { display: flex; align-items: center; min-height: 30px; padding: 0 8px; color: var(--codex-muted) !important; background: transparent !important; font-size: 11px; font-weight: 400; white-space: nowrap; }
-#annotation-handbook-examples .label-wrap:hover, #annotation-ground-truth .label-wrap:hover { background: var(--codex-hover) !important; }
-#annotation-handbook-examples > div:not(.wrap), #annotation-ground-truth > div:not(.wrap) { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30; width: 280px; padding: 8px !important; border: 1px solid var(--codex-border) !important; border-radius: 6px !important; background: #fff !important; box-shadow: 0 4px 16px rgba(0,0,0,.1); }
-#annotation-handbook-examples button[aria-label="Click to upload or drop files"], #annotation-ground-truth button[aria-label="Click to upload or drop files"] { min-height: 72px; }
-#annotation-handbook-examples .file-preview, #annotation-handbook-examples .upload-container, #annotation-ground-truth .file-preview, #annotation-ground-truth .upload-container { min-height: 0 !important; }
-#annotation-prompt textarea { min-height: 30px !important; max-height: 72px !important; padding: 4px 2px !important; border: 0 !important; box-shadow: none !important; background: transparent !important; font-size: 14px; }
-#annotation-prompt, #annotation-prompt .form, #annotation-prompt .wrap, #annotation-prompt .container { min-height: 0 !important; padding: 0 !important; border: 0 !important; box-shadow: none !important; }
-#annotation-composer-row { align-items: center; gap: 6px; min-height: 30px; flex-wrap: nowrap !important; }
-#annotation-composer-row > .form { flex: 1 1 auto !important; min-width: 0 !important; }
-#annotation-composer-row #annotation-prompt { flex: 1 1 auto !important; min-width: 0 !important; }
-#annotation-attach, #annotation-send { flex: 0 0 32px !important; width: 32px !important; min-width: 32px !important; min-height: 30px; border-radius: 6px !important; font-size: 12px; }
-#annotation-attach { padding: 0 !important; color: #5b5b5b !important; background: transparent !important; border: 0 !important; }
-#annotation-send { padding: 0 !important; color: #fff !important; background: var(--codex-ink) !important; border-color: var(--codex-ink) !important; }
-.task-card { margin: 16px 0; padding: 16px 20px; border: 1px solid var(--codex-border); border-radius: var(--panel-radius); background: #fafafa; }
-.task-card-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; font-size: 13px; font-weight: 600; }
-.task-card-status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 500; }
-.task-card-metrics { display: flex; gap: 28px; color: var(--codex-muted); font-size: 12px; }
-.task-card-metrics strong { color: var(--codex-ink); font-size: 18px; }
-.task-card-evaluation { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--codex-border); color: var(--codex-muted); font-size: 11px; }
-.task-card-evaluation .evaluation-label { color: var(--codex-ink); font-weight: 600; }
-.task-card-evaluation strong { color: var(--codex-ink); font-size: 13px; }
-.progress-card { margin: 14px 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
-.progress-card summary { display: flex; align-items: center; gap: 7px; cursor: pointer; color: var(--codex-ink); font-size: 13px; font-weight: 600; list-style: none; }
+/* Chat surface: feed, cards, composer, action panels. */
+
+#annotation-chat {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 40px !important;
+  gap: 0 !important;
+  background: var(--codex-bg) !important;
+  overflow-y: auto;
+  /* The feed only scrolls vertically; nowrap log details must never spawn a
+     horizontal scrollbar at the bottom of the chat column. */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  position: relative;
+}
+#annotation-chat > .block { flex-shrink: 0; }
+
+/* ---------- Welcome ---------- */
+#annotation-welcome {
+  position: static;
+  transform: none;
+  width: min(100%, var(--chat-max-width));
+  max-width: var(--chat-max-width);
+  margin: 84px auto 0;
+  padding: 0;
+  text-align: left;
+}
+.welcome-eyebrow {
+  margin-bottom: 16px;
+  color: var(--codex-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+}
+#annotation-welcome h2 {
+  margin: 0 0 10px;
+  color: var(--codex-ink);
+  font-size: 28px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  line-height: 1.4;
+}
+#annotation-welcome p { margin: 0; color: var(--codex-muted); font-size: 14px; }
+#annotation-chat:has(#annotation-chatbot .message) #annotation-welcome { display: none; }
+
+/* ---------- Sample cards ---------- */
+#annotation-samples {
+  flex: 0 0 auto;
+  width: min(100%, var(--chat-max-width));
+  margin: 30px auto 28px;
+  gap: 14px;
+  flex-wrap: nowrap !important;
+}
+#annotation-samples .sample-item {
+  gap: 0 !important;
+  min-width: 0 !important;
+  overflow: hidden;
+  border: 1px solid var(--codex-border);
+  border-radius: 10px;
+  background: #ffffff;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+#annotation-samples .sample-item:hover {
+  border-color: var(--codex-border-strong);
+  box-shadow: 0 3px 14px rgba(24, 24, 27, 0.06);
+}
+#annotation-samples .sample-image { border: 0 !important; border-radius: 0 !important; background: var(--codex-panel) !important; }
+#annotation-samples img { object-fit: contain !important; }
+#annotation-samples .sample-button {
+  min-width: 0 !important;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 0 !important;
+  border-top: 1px solid var(--codex-border) !important;
+  border-radius: 0 !important;
+  background: #ffffff !important;
+  color: var(--codex-text);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: none !important;
+}
+#annotation-samples .sample-button:hover { background: var(--codex-panel) !important; color: var(--codex-ink); }
+#annotation-chat:has(#annotation-chatbot .message) #annotation-samples { display: none; }
+
+/* ---------- Chatbot feed ---------- */
+#annotation-chatbot {
+  width: min(100%, var(--chat-max-width));
+  margin: 0 auto;
+  padding: 28px 0 24px;
+  height: auto !important;
+  min-height: 0 !important;
+  flex: 1 1 auto;
+  border: 0 !important;
+  background: transparent !important;
+}
+#annotation-chatbot:not(:has(.message)) { min-height: 0 !important; padding: 0; }
+#annotation-chatbot .bubble-wrap { gap: 18px !important; padding: 24px 0 28px !important; }
+/* Gradio 的消息行自带 20px 左侧偏移，会在容器内产生一条横向滚动条；
+   聊天流只应纵向滚动。 */
+#annotation-chatbot .bubble-wrap { overflow-x: hidden !important; }
+/* Gradio gives image messages a per-message Clear button; conversation state
+   is persisted per task, so a stray trash icon has no business in the feed. */
+#annotation-chatbot button[aria-label="Clear"] { display: none !important; }
+#annotation-chatbot .message-wrap { margin: 0 !important; }
+#annotation-chatbot .message-row.bot-row { width: 100% !important; max-width: 100% !important; margin-right: auto !important; }
+#annotation-chatbot .message-row.user-row { justify-content: flex-end !important; }
+#annotation-chatbot .flex-wrap.bot,
+#annotation-chatbot .flex-wrap.user {
+  width: 100% !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+#annotation-chatbot .flex-wrap.user { width: auto !important; max-width: min(560px, 78%) !important; }
+
+#annotation-chatbot .message {
+  max-width: min(680px, 88%) !important;
+  padding: 8px 12px !important;
+  border-radius: var(--message-radius) !important;
+  font-size: 14px !important;
+  line-height: 1.7 !important;
+  letter-spacing: 0 !important;
+}
+#annotation-chatbot .message.bot:not(.image) {
+  width: min(680px, 100%) !important;
+  max-width: min(680px, 100%) !important;
+  padding: 2px 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+#annotation-chatbot .message.user {
+  display: inline-block !important;
+  width: max-content !important;
+  min-width: 96px !important;
+  max-width: 100% !important;
+  padding: 8px 14px !important;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: var(--message-radius) !important;
+  background: var(--codex-panel) !important;
+  box-shadow: none !important;
+}
+#annotation-chatbot .message p,
+#annotation-chatbot .message li { font-size: 14px; line-height: 1.75; }
+#annotation-chatbot .message p { margin: 0 0 7px !important; }
+#annotation-chatbot .message p:last-child { margin-bottom: 0 !important; }
+#annotation-chatbot .message ul,
+#annotation-chatbot .message ol { margin: 5px 0 8px !important; padding-left: 22px !important; }
+#annotation-chatbot .message li { margin: 3px 0 !important; }
+#annotation-chatbot .message h1,
+#annotation-chatbot .message h2,
+#annotation-chatbot .message h3,
+#annotation-chatbot .message h4 {
+  margin: 10px 0 4px !important;
+  font-size: 14px !important;
+  font-weight: 650 !important;
+  line-height: 1.5 !important;
+}
+#annotation-chatbot .message code,
+#annotation-chatbot .message pre {
+  font-family: var(--font-mono) !important;
+  font-size: 12.5px !important;
+  background: var(--codex-panel);
+  border-radius: 4px;
+}
+#annotation-chatbot .message.bot.image {
+  width: min(320px, 82%) !important;
+  max-width: min(320px, 82%) !important;
+  padding: 0 !important;
+  background: transparent !important;
+}
+#annotation-chatbot .message.bot.image img {
+  display: block;
+  width: 100% !important;
+  height: auto !important;
+  max-height: 480px !important;
+  object-fit: contain !important;
+  border: 1px solid var(--codex-border);
+  border-radius: 8px;
+  cursor: zoom-in;
+  background: #ffffff;
+}
+
+/* ---------- Result artifacts ---------- */
+#annotation-results { width: min(100%, var(--chat-max-width)); margin: 4px auto 0; gap: 12px; }
+#annotation-results .block {
+  min-width: 0 !important;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+#annotation-results [data-testid="block-info"],
+#annotation-measurements [data-testid="block-info"] {
+  color: var(--codex-muted) !important;
+  font-size: 11px !important;
+}
+#annotation-measurements {
+  width: min(100%, var(--chat-max-width));
+  margin: 10px auto 0;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+}
+#annotation-measurements table,
+#annotation-measurements td,
+#annotation-measurements th { font-variant-numeric: tabular-nums; }
+#annotation-measurements thead th {
+  color: var(--codex-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---------- Agent progress timeline (terminal log) ---------- */
+.progress-card { margin: 12px 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.progress-card summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  color: var(--codex-ink);
+  font-size: 13px;
+  font-weight: 600;
+  list-style: none;
+}
 .progress-card summary::-webkit-details-marker { display: none; }
-.progress-summary-mark { display: inline-grid; width: 18px; height: 18px; place-items: center; color: #707070; font-size: 18px; line-height: 1; }
-.progress-state { margin-left: 2px; color: var(--codex-muted); font-size: 11px; font-weight: 400; }
-.progress-steps { margin: 8px 0 0 8px; padding: 1px 0 1px 15px; border-left: 1px solid #e3e3e0; color: var(--codex-muted); font-size: 12px; line-height: 1.45; }
-.activity-row { display: flex; align-items: baseline; gap: 8px; min-height: 25px; padding: 2px 0; color: #656565; }
-.activity-label { color: #555; white-space: nowrap; }
-.activity-meta { color: #9a9a9a; font-size: 11px; white-space: nowrap; }
-.activity-detail { min-width: 0; overflow: hidden; color: #8a8a8a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.activity-completed .activity-label { color: #777; }
-.activity-failed .activity-label { color: #b42318; }
-.activity-icon { position: relative; display: inline-block; flex: 0 0 14px; width: 14px; height: 14px; color: #7d7d7d; }
-.activity-icon::before { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; line-height: 14px; }
-.icon-check::before { content: "✓"; color: #777; }
-.icon-error::before { content: "×"; color: #b42318; font-size: 16px; }
-.icon-pending::before { content: "·"; color: #858585; font-size: 22px; }
-.icon-thinking::before { content: "◌"; color: #858585; }
+.progress-summary-mark {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--codex-faint);
+  font-size: 17px;
+  line-height: 1;
+}
+.progress-state {
+  margin-left: 2px;
+  color: var(--codex-faint);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+.progress-steps {
+  margin: 8px 0 0 8px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--codex-border);
+  color: var(--codex-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.activity-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 24px;
+  padding: 2px 0;
+  color: var(--codex-text);
+}
+.activity-label { color: var(--codex-text); white-space: nowrap; }
+.activity-completed .activity-label { color: var(--codex-muted); }
+.activity-failed .activity-label,
+.activity-failed .activity-icon { color: var(--codex-error); }
+.activity-warning .activity-label,
+.activity-warning .activity-icon { color: var(--codex-warning); }
+.activity-detail {
+  order: 2;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--codex-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-detail code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--codex-panel);
+  color: var(--codex-text);
+  font-size: 10.5px;
+}
+.activity-meta {
+  order: 3;
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--codex-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.activity-icon {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--codex-faint);
+}
+.activity-icon::before {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  line-height: 14px;
+}
+.icon-check::before { content: "✓"; color: var(--codex-success); font-size: 12px; }
+.icon-error::before { content: "×"; color: var(--codex-error); font-size: 16px; font-weight: 700; }
+.icon-pending::before { content: "·"; color: var(--codex-faint); font-size: 22px; }
+.icon-thinking::before { content: "◌"; color: var(--codex-faint); }
+.icon-dot::before { content: "·"; color: var(--codex-faint); font-size: 22px; }
 .icon-read::before { content: "▤"; }
 .icon-edit::before { content: "✎"; }
 .icon-command::before { content: ">_"; font-size: 9px; font-weight: 700; }
 .icon-search::before { content: "⌕"; font-size: 17px; }
 .icon-model::before { content: "✦"; font-size: 13px; }
 .icon-tool::before { content: "⌘"; }
-.activity-detail code { color: #6f6f6f; font-size: 11px; }
-@media (max-width: 640px) { .activity-detail { display: none; } .progress-steps { margin-left: 2px; } }
+.activity-running .icon-pending::before,
+.activity-running .icon-thinking::before { animation: activity-pulse 1.2s ease-in-out infinite; }
+@keyframes activity-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* ---------- 尝试分组（ZCode 式工具树） ---------- */
+/* 每个候选尝试一个可折叠分组：历史收起、当前展开，子步骤缩进挂在组下。 */
+.progress-card .attempt-group { margin: 1px 0 1px 14px; }
+.progress-card .attempt-group > summary {
+  display: flex;
+  align-items: flex-start;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.progress-card .attempt-group > summary::-webkit-details-marker { display: none; }
+.progress-card .attempt-group > summary:hover .activity-label { color: var(--codex-ink); }
+.progress-card .attempt-group > summary .activity-row { flex: 1 1 auto; min-width: 0; min-height: 22px; }
+.group-caret {
+  flex: 0 0 12px;
+  color: var(--codex-faint);
+  font-size: 9px;
+  line-height: 24px;
+  text-align: center;
+}
+.group-caret::before { content: "▸"; }
+.attempt-group[open] .group-caret::before,
+.thinking-group[open] .group-caret::before { content: "▾"; }
+.attempt-group-steps {
+  margin: 0 0 4px 6px;
+  padding: 1px 0 1px 7px;
+  border-left: 1px solid var(--codex-border);
+}
+
+/* ---------- 思考折叠组 ---------- */
+/* 连续的思考行合并为一个可折叠组：进行中自动展开，结束后收起，点击可回看。 */
+.progress-card .thinking-group { margin: 1px 0 1px 14px; }
+.progress-card .thinking-group > summary {
+  display: flex;
+  align-items: flex-start;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.progress-card .thinking-group > summary::-webkit-details-marker { display: none; }
+.progress-card .thinking-group > summary:hover .activity-label { color: var(--codex-ink); }
+.thinking-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 24px;
+  color: var(--codex-text);
+}
+.thinking-head .activity-label { color: var(--codex-muted); 
+    white-space: pre-line;}
+.thinking-head .activity-label,
+.thinking-head .activity-icon { line-height: 24px; }
+.thinking-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--codex-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thinking-meta {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--codex-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.thinking-group.is-running .icon-thinking::before { animation: activity-pulse 1.2s ease-in-out infinite; }
+.thinking-group-items {
+  margin: 0 0 4px 6px;
+  padding: 1px 0 1px 7px;
+  border-left: 1px solid var(--codex-border);
+}
+.thinking-item .activity-label { white-space: normal; }
+
+/* ---------- Result task card ---------- */
+.task-card {
+  margin: 14px 0;
+  padding: 16px 18px;
+  border: 1px solid var(--codex-border);
+  border-radius: var(--panel-radius);
+  background: var(--codex-sidebar);
+}
+.task-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.task-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.task-card-status.status-pending { border-color: var(--codex-accent); background: var(--codex-accent); color: #ffffff; }
+.task-card-status.status-feedback { border-color: #f0e0c4; background: var(--codex-warning-bg); color: var(--codex-warning); }
+.task-card-status.status-accepted { border-color: #d0e9d8; background: var(--codex-success-bg); color: var(--codex-success); }
+.task-card-metrics { display: flex; flex-wrap: wrap; gap: 14px 28px; color: var(--codex-muted); font-size: 12px; }
+.task-card-metrics strong {
+  color: var(--codex-ink);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.task-card-evaluation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--codex-border);
+  color: var(--codex-muted);
+  font-size: 11px;
+}
+.task-card-evaluation .evaluation-label {
+  color: var(--codex-text);
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+.task-card-evaluation strong {
+  color: var(--codex-ink);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Next actions (human review gate) ---------- */
+#annotation-main #annotation-next-actions {
+  position: relative !important;
+  inset: auto !important;
+  z-index: 19;
+  flex: 0 0 auto !important;
+  width: min(var(--chat-max-width), calc(100% - 80px)) !important;
+  margin: 0 auto !important;
+  padding: 14px 0 2px !important;
+  border: 0 !important;
+  border-top: 1px solid var(--codex-border) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  gap: 8px !important;
+}
+#annotation-next-actions .next-action-title { margin: 0 0 10px; color: var(--codex-ink); font-size: 13px; font-weight: 600; }
+#annotation-next-actions .next-action-note { display: none; }
+#annotation-next-actions .next-action-row { justify-content: flex-start !important; gap: 8px !important; flex-wrap: wrap !important; }
+#annotation-next-actions .next-action-row button {
+  min-width: 0 !important;
+  min-height: 34px;
+  padding: 0 16px !important;
+  border: 1px solid var(--codex-border-strong) !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  color: var(--codex-text) !important;
+  font-size: 12.5px;
+  box-shadow: none !important;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+#annotation-next-actions .next-action-row button:hover { background: var(--codex-hover) !important; border-color: var(--codex-faint) !important; }
+#annotation-next-actions #annotation-accept,
+#annotation-next-actions #annotation-accept button {
+  background: var(--codex-accent) !important;
+  border-color: var(--codex-accent) !important;
+  color: #ffffff !important;
+  font-weight: 600;
+}
+#annotation-next-actions #annotation-accept:hover,
+#annotation-next-actions #annotation-accept button:hover { background: var(--codex-accent-hover) !important; border-color: var(--codex-accent-hover) !important; }
+#annotation-next-actions #annotation-exit { border: 0 !important; background: transparent !important; color: var(--codex-muted) !important; }
+#annotation-next-actions #annotation-exit:hover { background: transparent !important; color: var(--codex-ink) !important; }
+#annotation-next-actions .artifact-action-row { margin-top: 0; }
+
+/* ---------- Artifact actions (view Mask / measurements) ---------- */
+/* 与验收栏同宽居中，但独立于人工验收流程：验收完成后仍可打开产物。 */
+#annotation-main #annotation-artifact-actions {
+  position: relative !important;
+  inset: auto !important;
+  z-index: 19;
+  flex: 0 0 auto !important;
+  width: min(var(--chat-max-width), calc(100% - 80px)) !important;
+  margin: 0 auto !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  gap: 0 !important;
+}
+#annotation-artifact-actions .artifact-action-row {
+  justify-content: flex-start !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+#annotation-artifact-actions .artifact-action-row button,
+#annotation-next-actions .artifact-action-row button {
+  min-height: 26px;
+  padding: 0 10px !important;
+  border: 0 !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  color: var(--codex-muted) !important;
+  font-size: 11.5px;
+}
+#annotation-artifact-actions .artifact-action-row button:hover {
+  background: var(--codex-hover) !important;
+  color: var(--codex-ink) !important;
+}
+
+/* ---------- Feedback canvas (slide-in correction panel) ---------- */
+/* 底部留出 composer 的高度，避免修正面板盖住输入框和发送按钮；
+   面板内容超高时在面板内部滚动。 */
+#annotation-feedback-canvas {
+  position: fixed !important;
+  inset: 80px 24px 160px auto !important;
+  z-index: 100;
+  width: 400px !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 16px !important;
+  overflow: auto;
+  visibility: hidden;
+  pointer-events: none;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 12px !important;
+  background: var(--codex-bg) !important;
+  box-shadow: 0 12px 40px rgba(24, 24, 27, 0.14) !important;
+  opacity: 0;
+  transform: translateX(440px) !important;
+  transition: opacity 0.18s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0.3s;
+}
+#annotation-feedback-canvas.feedback-open {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateX(0) !important;
+  transition-delay: 0s;
+}
+#annotation-feedback-canvas .feedback-canvas-note {
+  margin: 0 0 12px;
+  color: var(--codex-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+#annotation-feedback-editor,
+#annotation-green-feedback-editor {
+  max-height: none;
+  overflow: hidden;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 8px !important;
+  background: var(--codex-sidebar) !important;
+}
+#annotation-feedback-editor { margin-bottom: 12px; }
+/* 画板只保留绘画必需的工具：下载/平移/缩放/重做/清空/图层入口一律隐藏，
+   避免用户误触后落盘的反馈与所见不一致。 */
+#annotation-feedback-editor button[aria-label="Download"],
+#annotation-feedback-editor button[aria-label="Pan"],
+#annotation-feedback-editor button[aria-label="Zoom out"],
+#annotation-feedback-editor button[aria-label="Zoom in"],
+#annotation-feedback-editor button[aria-label="Redo"],
+#annotation-feedback-editor button[aria-label="Clear canvas"],
+#annotation-feedback-editor button[aria-label="Show Layers"],
+#annotation-green-feedback-editor button[aria-label="Download"],
+#annotation-green-feedback-editor button[aria-label="Pan"],
+#annotation-green-feedback-editor button[aria-label="Zoom out"],
+#annotation-green-feedback-editor button[aria-label="Zoom in"],
+#annotation-green-feedback-editor button[aria-label="Redo"],
+#annotation-green-feedback-editor button[aria-label="Clear canvas"],
+#annotation-green-feedback-editor button[aria-label="Show Layers"] {
+  display: none !important;
+}
+#annotation-feedback-editor .image-container,
+#annotation-green-feedback-editor .image-container {
+  min-height: 210px !important;
+  max-height: 260px !important;
+  background: var(--codex-sidebar) !important;
+}
+#annotation-feedback-controls { justify-content: flex-end !important; gap: 8px; margin-top: 2px; }
+#annotation-clear-feedback,
+#annotation-cancel-feedback,
+#annotation-submit-feedback {
+  min-height: 32px !important;
+  border-radius: 7px !important;
+  font-size: 11.5px !important;
+  box-shadow: none !important;
+}
+#annotation-clear-feedback,
+#annotation-cancel-feedback {
+  background: #ffffff !important;
+  border: 1px solid var(--codex-border) !important;
+  color: var(--codex-text) !important;
+}
+#annotation-clear-feedback:hover,
+#annotation-cancel-feedback:hover { background: var(--codex-hover) !important; }
+#annotation-submit-feedback {
+  background: var(--codex-accent) !important;
+  border-color: var(--codex-accent) !important;
+  color: #ffffff !important;
+  font-weight: 600;
+}
+#annotation-submit-feedback:hover { background: var(--codex-accent-hover) !important; }
+
+/* ---------- Composer ---------- */
+#annotation-main #annotation-composer {
+  position: relative !important;
+  inset: auto !important;
+  z-index: 20;
+  flex: 0 0 auto !important;
+  width: min(var(--composer-max-width), calc(100% - 80px)) !important;
+  margin: 14px auto 24px !important;
+  padding: 13px 14px 9px !important;
+  gap: 8px !important;
+  border: 1px solid var(--codex-border-strong) !important;
+  border-radius: 12px !important;
+  background: var(--codex-bg) !important;
+  box-shadow: 0 2px 14px rgba(24, 24, 27, 0.05) !important;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+#annotation-composer:focus-within {
+  border-color: var(--codex-ink) !important;
+  box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.06) !important;
+}
+/* Gradio wraps the prompt/rows in .form containers and Groups in a .styler
+   div that carry the zinc panel background; the composer card itself is the
+   only chrome here, same for the Group-wrapped action bar and panel. */
+#annotation-composer .form,
+#annotation-next-actions .form,
+#annotation-next-actions .styler,
+#annotation-feedback-canvas .form,
+#annotation-feedback-canvas .styler {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+#annotation-attachment-row { align-items: center; gap: 6px; min-height: 24px; }
+#annotation-attachment-row:not(:has(#annotation-attachment-label .prose p)) { display: none; }
+#annotation-attachment-row #annotation-attachment-label { flex: 1 1 auto; min-width: 0 !important; min-height: 0; margin: 0; }
+#annotation-attachment-label p {
+  overflow-wrap: anywhere;
+  color: var(--codex-text);
+  font-size: 11.5px;
+}
+#annotation-attachment-view,
+#annotation-attachment-clear {
+  flex: 0 0 auto;
+  min-height: 24px !important;
+  padding: 2px 8px !important;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 5px !important;
+  background: #ffffff !important;
+  color: var(--codex-text) !important;
+  font-size: 11px !important;
+  box-shadow: none !important;
+}
+#annotation-attachment-view:hover,
+#annotation-attachment-clear:hover { background: var(--codex-hover) !important; }
+#annotation-attachment-clear { color: var(--codex-error) !important; }
+#annotation-attachment-preview {
+  max-height: 180px;
+  height: 180px !important;
+  min-height: 0 !important;
+  margin: 4px 0 6px;
+  border: 1px solid var(--codex-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+#annotation-attachment-preview img { max-height: 180px !important; object-fit: contain !important; }
+
+#annotation-prompt,
+#annotation-prompt .form,
+#annotation-prompt .wrap,
+#annotation-prompt .container {
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+#annotation-prompt textarea {
+  min-height: 54px !important;
+  max-height: 120px !important;
+  padding: 4px 2px !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: var(--codex-ink) !important;
+  font-size: 14px;
+  line-height: 1.7;
+}
+#annotation-prompt textarea::placeholder { color: var(--codex-faint); }
+
+#annotation-composer-row { align-items: center; gap: 8px; min-height: 36px; flex-wrap: nowrap !important; }
+#annotation-composer-row > .form { flex: 1 1 auto !important; min-width: 0 !important; }
+#annotation-composer-row #annotation-prompt { flex: 1 1 auto !important; min-width: 0 !important; }
+#annotation-composer-row #annotation-composer-spacer {
+  display: block;
+  min-width: 0 !important;
+  flex: 1 1 0 !important;
+  text-align: right;
+}
+.composer-context {
+  padding-right: 8px;
+  color: var(--codex-faint);
+  font-size: 11px;
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
+#annotation-attach,
+#annotation-send {
+  flex: 0 0 36px !important;
+  width: 36px !important;
+  min-width: 36px !important;
+  min-height: 36px !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+#annotation-attach {
+  padding: 0 !important;
+  color: var(--codex-muted) !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  font-size: 20px;
+}
+#annotation-attach:hover { background: var(--codex-hover) !important; color: var(--codex-ink) !important; }
+#annotation-send {
+  border-radius: 50% !important;
+  padding: 0 !important;
+  color: #ffffff !important;
+  background: var(--codex-accent) !important;
+  border-color: var(--codex-accent) !important;
+  font-size: 17px;
+  transition: background 0.12s ease;
+}
+#annotation-send:hover { background: var(--codex-accent-hover) !important; }
+
+/* Reference / ground-truth upload accordions inside the composer */
+#annotation-handbook-examples,
+#annotation-ground-truth {
+  position: relative;
+  flex: 0 0 auto !important;
+  width: 104px !important;
+  min-width: 104px !important;
+  height: 36px !important;
+  min-height: 36px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  overflow: visible !important;
+  box-shadow: none !important;
+}
+#annotation-handbook-examples .label-wrap,
+#annotation-ground-truth .label-wrap {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--codex-muted) !important;
+  background: transparent !important;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+#annotation-handbook-examples .label-wrap:hover,
+#annotation-ground-truth .label-wrap:hover { color: var(--codex-ink) !important; }
+#annotation-handbook-examples .label-wrap::before,
+#annotation-ground-truth .label-wrap::before { content: none; }
+#annotation-handbook-examples [data-testid="block-info"],
+#annotation-ground-truth [data-testid="block-info"] {
+  display: none;
+}
+#annotation-handbook-examples > div:not(.wrap),
+#annotation-ground-truth > div:not(.wrap) {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 30;
+  width: 280px;
+  max-width: calc(100vw - 40px);
+  padding: 10px !important;
+  border: 1px solid var(--codex-border) !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  box-shadow: 0 8px 28px rgba(24, 24, 27, 0.1);
+}
+#annotation-handbook-examples > div:not(.wrap) [data-testid="block-info"],
+#annotation-ground-truth > div:not(.wrap) [data-testid="block-info"] {
+  display: block;
+  color: var(--codex-muted) !important;
+  font-size: 11px;
+  white-space: normal;
+}
+#annotation-handbook-examples button[aria-label="Click to upload or drop files"],
+#annotation-ground-truth button[aria-label="Click to upload or drop files"] { min-height: 72px; }
+#annotation-handbook-examples .file-preview,
+#annotation-handbook-examples .upload-container,
+#annotation-ground-truth .file-preview,
+#annotation-ground-truth .upload-container { min-height: 0 !important; }
+
+/* ---------- Chat responsive ---------- */
+@media (min-width: 1440px) {
+  #annotation-welcome { margin-top: 100px; }
+  #annotation-samples .sample-image { height: 144px !important; }
+}
+@media (max-height: 760px) {
+  #annotation-welcome { margin-top: 32px; }
+  #annotation-samples { margin-top: 20px; }
+}
+@media (max-width: 820px) {
+  #annotation-chat { padding: 0 20px !important; }
+  #annotation-welcome { margin-top: 36px; }
+  #annotation-welcome h2 { font-size: 23px; }
+  #annotation-samples { gap: 10px; margin-top: 22px; }
+  #annotation-samples .sample-image { height: 96px !important; }
+  #annotation-main #annotation-composer {
+    width: calc(100% - 32px) !important;
+    margin: 12px auto max(12px, env(safe-area-inset-bottom)) !important;
+    padding: 12px;
+  }
+  #annotation-main #annotation-next-actions { width: calc(100% - 40px) !important; }
+  #annotation-attachment-label { flex: 1 1 100%; }
+  #annotation-attachment-view,
+  #annotation-attachment-clear { flex: 0 0 auto !important; min-width: 80px !important; width: auto !important; }
+  #annotation-attachment-preview { height: 140px !important; }
+  #annotation-attachment-preview img { max-height: 140px !important; }
+  #annotation-feedback-canvas { inset: 16px 12px 16px 12px !important; width: auto !important; }
+}
+@media (max-width: 640px) {
+  .activity-row { flex-wrap: wrap; }
+  .activity-detail { display: none; }
+  .progress-steps { margin-left: 2px; }
+}
+@media (max-width: 480px) {
+  #annotation-welcome h2 { font-size: 21px; }
+  #annotation-welcome p { font-size: 12px; }
+  #annotation-samples .sample-image { height: 80px !important; }
+  #annotation-samples .sample-button { padding: 0 8px; min-height: 38px; font-size: 11px; }
+  #annotation-handbook-examples,
+  #annotation-ground-truth { width: 88px !important; min-width: 88px !important; }
+  #annotation-handbook-examples .label-wrap,
+  #annotation-ground-truth .label-wrap { padding: 0 8px; font-size: 11px; }
+  #annotation-handbook-examples > div:not(.wrap) { left: -44px; }
+  #annotation-ground-truth > div:not(.wrap) { left: -140px; }
+  .composer-context { display: none; }
+  #annotation-composer-row { gap: 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #annotation-feedback-canvas,
+  #annotation-samples .sample-item,
+  #annotation-send,
+  #annotation-new-task { transition: none !important; }
+  .activity-running .icon-pending::before,
+  .activity-running .icon-thinking::before,
+  .thinking-group.is-running .icon-thinking::before { animation: none !important; }
+}

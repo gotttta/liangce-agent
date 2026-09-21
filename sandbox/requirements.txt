@@ -1,0 +1,6 @@
+# Match the application lockfile; rebuild the image when these change.
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+scipy==1.18.1
+scikit-image==0.26.0
+pillow==11.3.0

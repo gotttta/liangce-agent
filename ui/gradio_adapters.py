@@ -25,13 +25,17 @@ def measurement_rows(state):
 def output_files(state):
     run_dir = Path(state["run_dir"])
     iteration_dir = run_dir / f"iteration_{state.get('iteration', 0)}"
-    return [
+    paths = [
         state["annotated_image_path"],
         state["predicted_mask_path"],
         str(iteration_dir / "measurements.json"),
         str(iteration_dir / "strategy.json"),
         str(iteration_dir / "graph_state.json"),
     ]
+    for name in ('outputs.json', 'contours.json', 'delivery_manifest.json', 'raw_outputs.json', 'execution_spec.json'):
+        if (iteration_dir / name).exists():
+            paths.append(str(iteration_dir / name))
+    return [path for path in paths if path]
 
 
 def save_feedback_layer(editor_value, run_dir):

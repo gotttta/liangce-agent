@@ -32,30 +32,42 @@ def extract_annotation_from_reference(reference_image_path, color_ranges=None):
     return mask, confidence
 
 
-def extract_ground_truth_mask(annotation_image_path, expected_shape=None, color_ranges=None):
-    """Convert a Handbook annotation into a filled binary Ground Truth mask.
+def extract_ground_truth_mask(annotation_image_path, expected_shape=None, color_ranges=None, source_kind="auto"):
+    """Keep binary labels exact; infer filled regions only from colored contours.
 
-    Handbook files normally contain thin colored contours.  Those contours are
-    useful for people but not for pixel metrics, so this function extracts the
-    ink, closes small anti-aliasing gaps, and fills each outer contour.
+    The original source and extraction parameters are retained by TaskStore.
+    Color inference is a derived reference, previewed separately in the UI.
     """
     path = Path(annotation_image_path)
     image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if image is None:
         raise ValueError(f"无法读取 Ground Truth 标注图：{path}")
-    if image.ndim == 2:
-        source = image
+    if source_kind not in {"auto", "binary", "colored_contour"}:
+        raise ValueError("source_kind must be auto, binary or colored_contour")
+    binary_source = source_kind == "binary" or (source_kind == "auto" and (
+        image.ndim == 2 or np.all(image[:, :, :3] == image[:, :, :1])))
+    if binary_source:
+        source = image if image.ndim == 2 else image[:, :, 0]
+        if len(np.unique(source)) > 2:
+            raise ValueError("二值 Ground Truth 只能包含背景与前景两种标签值")
         color_mask = _binary_mask(source)
     else:
         bgr = image[:, :, :3]
         color_mask = _colored_annotation_mask(bgr, color_ranges=color_ranges)
-        if not np.any(color_mask):
-            color_mask = _binary_mask(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY))
     if expected_shape is not None and tuple(color_mask.shape) != tuple(expected_shape):
         raise ValueError(
             "Ground Truth 标注图尺寸与当前原图不一致："
             f"{list(color_mask.shape)} != {list(expected_shape)}"
         )
+    if binary_source:
+        return color_mask, {
+            "source_kind": "binary", "extraction_version": 1,
+            "parameters": {}, "annotation_shape": list(color_mask.shape),
+            "annotation_pixel_count": int(color_mask.sum()),
+            "filled_pixel_count": int(color_mask.sum()),
+            "coverage": round(float(color_mask.mean()), 6),
+            "contour_count": cv2.connectedComponents(color_mask.astype(np.uint8))[0] - 1,
+        }
     if not np.any(color_mask):
         raise ValueError("未在 Ground Truth 标注图中识别到彩色轮廓或二值 Mask")
 
@@ -76,6 +88,9 @@ def extract_ground_truth_mask(annotation_image_path, expected_shape=None, color_
         raise ValueError("Ground Truth 轮廓无法形成有效的闭合目标区域")
     mask = filled.astype(bool)
     return mask, {
+        "source_kind": "colored_contour", "extraction_version": 1,
+        "parameters": {"close_kernel": [3, 3], "min_contour_area": 4.0,
+                       "color_ranges": color_ranges, "fill": "external_contours"},
         "annotation_shape": list(mask.shape),
         "contour_count": len(retained),
         "annotation_pixel_count": int(np.count_nonzero(color_mask)),

@@ -12,26 +12,26 @@ def morphology(mask, method="open_then_close", radius=1):
         result = mask.data.copy()
     else:
         from skimage.morphology import (
-            binary_closing,
-            binary_dilation,
-            binary_erosion,
-            binary_opening,
+            closing,
+            dilation,
+            erosion,
+            opening,
             disk,
         )
 
         footprint = disk(radius)
         if method == "open":
-            result = binary_opening(mask.data, footprint)
+            result = opening(mask.data, footprint, mode="ignore")
         elif method == "close":
-            result = binary_closing(mask.data, footprint)
+            result = closing(mask.data, footprint, mode="ignore")
         elif method == "open_then_close":
-            result = binary_closing(binary_opening(mask.data, footprint), footprint)
+            result = closing(opening(mask.data, footprint, mode="ignore"), footprint, mode="ignore")
         elif method == "close_then_open":
-            result = binary_opening(binary_closing(mask.data, footprint), footprint)
+            result = opening(closing(mask.data, footprint, mode="ignore"), footprint, mode="ignore")
         elif method == "dilate":
-            result = binary_dilation(mask.data, footprint)
+            result = dilation(mask.data, footprint, mode="ignore")
         else:
-            result = binary_erosion(mask.data, footprint)
+            result = erosion(mask.data, footprint, mode="ignore")
     metadata = {"operator": "morphology", "method": method, "radius": radius}
     return OperatorResult(MaskArtifact(result, metadata=metadata), metadata)
 
@@ -137,9 +137,22 @@ def apply_valid_mask(mask, valid_mask):
     return OperatorResult(MaskArtifact(constrained, metadata=metadata), metadata)
 
 
+def apply_mask_constraint(mask, valid_mask):
+    """V3 named-port form of apply_valid_mask."""
+    return apply_valid_mask(mask, valid_mask)
+
+
 def register_mask_operators(registry):
     registry.register("morphology", morphology, MaskArtifact, MaskArtifact)
     registry.register("fill_holes", fill_holes, MaskArtifact, MaskArtifact)
     registry.register("filter_components", filter_components, MaskArtifact, MaskArtifact)
     registry.register("extract_contours", extract_contours, MaskArtifact, ContourArtifact)
     registry.register("apply_valid_mask", apply_valid_mask, MaskArtifact, MaskArtifact)
+    registry.register(
+        "apply_mask_constraint",
+        apply_mask_constraint,
+        MaskArtifact,
+        MaskArtifact,
+        input_ports={"mask": MaskArtifact, "valid_mask": MaskArtifact},
+        legacy_allowed=False,
+    )

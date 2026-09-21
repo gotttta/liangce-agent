@@ -5,13 +5,16 @@ executor. LangGraph owns task state, planning boundaries and the human decision
 boundary; it does not replace the CV execution layer.
 """
 
+from core.task_contract import establish_contract, apply_contract, check_delivery
+from core.runtime_logging import logger, logged_operation, bind_context
+
 import json
 import time
 from pathlib import Path
 from typing import Optional, TypedDict
 from uuid import uuid4
 
-from langgraph.checkpoint.memory import MemorySaver
+from core.memory.checkpoints import get_checkpointer
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
@@ -28,22 +31,21 @@ from core.agent_loop import (
     run_planned_agent,
 )
 from core.reference_extraction import extract_annotation_from_reference, reference_mask_stats
-from core.task_store import save_rejection_record
+from core.experiments.lifecycle import compatible_baseline, record_review, record_human_review, revision_evidence
+from core.measurement.evaluation import GROUND_TRUTH_GATE, meets_ground_truth_gate
+from core.task_store import TaskStore, save_rejection_record
 from agent_types import normalize_strategy
 from providers.vision import normalize_acceptance_criteria, normalize_reference_examples
 
 
-_CHECKPOINTER = MemorySaver()
-
-GROUND_TRUTH_GATE = {
-    "dice": 0.85,
-    "recall": 0.90,
-    "precision": 0.85,
-    "boundary_f1": 0.80,
-}
-
+_CHECKPOINTER = None  # Optional override for integrations/tests; default is durable SQLite.
 
 class AgentGraphState(TypedDict, total=False):
+    memory_context: dict
+    task_id: str
+    coordinate_version: str
+    contours_path: str
+    input_sha256: str
     target_image_path: str
     description: str
     original_task_goal: str
@@ -53,12 +55,16 @@ class AgentGraphState(TypedDict, total=False):
     output_root: str
     unit: str
     max_candidates: int
+    max_calibration_candidates: int
     max_auto_revisions: int
     revision_count: int
     experiment_history: list[dict]
+    experiment_records: list[dict]
+    verified_baseline: Optional[dict]
     previous_state: Optional[dict]
     understanding: dict
     acceptance_criteria: dict
+    task_contract: dict
     retrieved_algorithms: list[dict]
     planned_candidates: list[dict]
     trajectory: list[dict]
@@ -71,6 +77,8 @@ class AgentGraphState(TypedDict, total=False):
     parent_iteration: Optional[int]
     parent_result_image_path: Optional[str]
     strategy: dict
+    retained_experiment_id: str
+    selected_experiment_id: str
     selected_candidate: str
     rendering: dict
     quality_report: dict
@@ -95,7 +103,7 @@ class AgentGraphState(TypedDict, total=False):
 def build_agent_graph(
     provider=None,
     algorithm_registry=None,
-    max_candidates=3,
+    max_candidates=1,
     checkpointer=None,
 ):
     workflow = StateGraph(AgentGraphState)
@@ -126,14 +134,18 @@ def build_agent_graph(
         _route_after_revision,
         {"execute": "execute_candidates", "fail": "report_failure"},
     )
-    workflow.add_edge("report_failure", END)
+    # A bounded automatic retry failure is still a human-review outcome.  It
+    # must create the same interrupt as an ordinary rendered candidate so the
+    # UI can accept, continue, or exit consistently.
+    workflow.add_edge("report_failure", "wait_for_human")
     workflow.add_edge("decide_next_action", "wait_for_human")
     workflow.add_edge("wait_for_human", END)
     if checkpointer is False:
         return workflow.compile()
-    return workflow.compile(checkpointer=checkpointer or _CHECKPOINTER)
+    return workflow.compile(checkpointer=checkpointer or _CHECKPOINTER or get_checkpointer())
 
 
+@logged_operation("run_agent_graph")
 def run_agent_graph(
     target_image_path,
     description,
@@ -143,7 +155,7 @@ def run_agent_graph(
     ground_truth_mask_path=None,
     ground_truth_annotation_path=None,
     unit="pixel",
-    max_candidates=3,
+    max_candidates=1,
     max_auto_revisions=2,
     provider=None,
     algorithm_registry=None,
@@ -152,9 +164,55 @@ def run_agent_graph(
     previous_state=None,
     thread_id=None,
     event_callback=None,
+    max_calibration_candidates=0,
+    memory_context=None,
+    task_store=None,
+    task_id=None,
 ):
+    run_started = time.monotonic()
     graph_thread_id = thread_id or f"agent_{uuid4().hex}"
+    if memory_context is None:
+        task_store = task_store or TaskStore(Path(output_root).parent / "workspace" / "tasks")
+        algorithm_registry = algorithm_registry or task_store.algorithm_registry
+    graph = build_agent_graph(
+        provider=provider,
+        algorithm_registry=algorithm_registry,
+        max_candidates=max_candidates,
+    )
+    config = {"configurable": {"thread_id": graph_thread_id}}
+    snapshot = graph.get_state(config)
+    if snapshot.values:
+        from core.memory.service import image_hash
+        if (snapshot.values.get("target_image_path") != str(target_image_path)
+                or snapshot.values.get("input_sha256") != image_hash(target_image_path)
+                or snapshot.values.get("description") != description):
+            raise ValueError("Existing graph thread belongs to a different input")
+        if snapshot.tasks and any(task.interrupts for task in snapshot.tasks):
+            return {**snapshot.values, "interrupt": _serialize_interrupts(
+                [item for task in snapshot.tasks for item in task.interrupts])}
+        if not snapshot.next:
+            return dict(snapshot.values)
+        memory_context = snapshot.values.get("memory_context") or {}
+        task_id = snapshot.values.get("task_id")
+        if memory_context.get("task_root"):
+            task_store = TaskStore(memory_context["task_root"])
+    restoring = bool(snapshot.values)
+
+    owns_memory = memory_context is None or restoring
+    if owns_memory and not restoring:
+        task_store = task_store or TaskStore(Path(output_root).parent / "workspace" / "tasks")
+        task_id = task_id or (previous_state or {}).get("task_id") or task_store.create_task()["id"]
+        task_store.load_task(task_id)  # Validate an explicit task ID before writing memory.
+        previous_state = previous_state or task_store.load_latest_state(task_id)
+        previous_state, memory_context = task_store.memory_service.prepare(
+            task_id, description, target_image_path, previous_state)
+        task_store.append_message(task_id, "user", description)
+    bind_context(task_id=memory_context.get("task_id") or task_id or "-")
     initial_state: AgentGraphState = {
+        "memory_context": memory_context,
+        "task_id": memory_context.get("task_id"),
+        "input_sha256": memory_context.get("input_sha256"),
+        "coordinate_version": "stored-pixels-v1",
         "target_image_path": str(target_image_path),
         "description": description,
         "reference_examples": normalize_reference_examples(
@@ -165,27 +223,26 @@ def run_agent_graph(
         "output_root": str(output_root),
         "unit": unit,
         "max_candidates": max_candidates,
+        "max_calibration_candidates": max(0, int(max_calibration_candidates)),
         "max_auto_revisions": max(0, int(max_auto_revisions)),
         "revision_count": 0,
         "experiment_history": [],
+        "experiment_records": (previous_state or {}).get("experiment_records", []),
+        "verified_baseline": (previous_state or {}).get("verified_baseline"),
         "previous_state": previous_state,
         "original_task_goal": (previous_state or {}).get("original_task_goal") or description,
+        "task_contract": (previous_state or {}).get("task_contract") or {},
         "understanding": understanding,
         "retrieved_algorithms": retrieved_algorithms,
         "trajectory": [],
         "status": "pending",
         "graph_thread_id": graph_thread_id,
     }
-    graph = build_agent_graph(
-        provider=provider,
-        algorithm_registry=algorithm_registry,
-        max_candidates=max_candidates,
-    )
     if event_callback:
         register_event_listener(event_callback)
     try:
         result = graph.invoke(
-            initial_state,
+            None if restoring else initial_state,
             config={"configurable": {"thread_id": graph_thread_id}},
         )
     finally:
@@ -194,14 +251,27 @@ def run_agent_graph(
     if result.get("__interrupt__"):
         result["interrupt"] = _serialize_interrupts(result["__interrupt__"])
         _write_trajectory(result)
+    if owns_memory:
+        result["memory_summary"] = task_store.memory_service.record_result(
+            task_id, description, result.get("understanding") or {}, result, previous_state)
+        task_store.save_node_result(task_id, "execute_candidate",
+                                    {"description": description},
+                                    {key: value for key, value in result.items() if key not in {"__interrupt__", "previous_state"}},
+                                    time.monotonic() - run_started)
     return result
 
 
+@logged_operation("resume_agent_graph")
 def resume_agent_graph(thread_id, response, event_callback=None):
     """Resume a paused human-review node without re-running earlier nodes."""
     if not thread_id:
         raise ValueError("缺少 Agent thread ID，无法恢复工作流")
     graph = build_agent_graph()
+    snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+    if not snapshot.values:
+        raise ValueError("未找到持久化工作流检查点")
+    if not snapshot.next:
+        return dict(snapshot.values)
     if event_callback:
         register_event_listener(event_callback)
     try:
@@ -263,11 +333,23 @@ def _make_understand_task_node(provider):
                     state["target_image_path"],
                     state["description"],
                     previous_context={
+                        **(state.get("memory_context") or {}),
+                        **{key: (state.get("previous_state") or {}).get(key) for key in (
+                            "false_positive_mask_path", "false_negative_mask_path", "feedback",
+                            "include_mask_path", "exclude_mask_path", "selected_experiment_id")},
+                        "experiment_output_root": state.get("output_root", "outputs"),
                         "original_task_goal": (state.get("previous_state") or {}).get("original_task_goal")
                         or state.get("original_task_goal")
                         or state.get("description"),
+                        "task_contract": state.get("task_contract"),
                         "previous_pipeline": (state.get("previous_state") or {}).get("pipeline"),
                         "previous_quality": (state.get("previous_state") or {}).get("quality_report"),
+                        "previous_result_image_path": (state.get("previous_state") or {}).get("annotated_image_path"),
+                        "review": (state.get("previous_state") or {}).get("review"),
+                        "execution_feedback": {"attempts": revision_evidence({**state, **{
+                            key: (state.get("previous_state") or {}).get(key) for key in (
+                                "human_feedback", "include_mask_path", "exclude_mask_path")
+                        }})},
                         "reference_examples": state.get("reference_examples", []),
                         "reference_masks": state.get("reference_masks", []),
                         "ground_truth_mask_path": state.get("ground_truth_mask_path"),
@@ -277,6 +359,7 @@ def _make_understand_task_node(provider):
                     reference_examples=state.get("reference_examples", []),
                 )
             except Exception as exc:
+                logger.warning("Graph operation recovered from exception", exc_info=True)
                 # Provider/schema failures are recoverable. Preserve the error
                 # as context while letting the deterministic planner continue.
                 description = state["description"]
@@ -296,12 +379,22 @@ def _make_understand_task_node(provider):
                     "target_constraints": {},
                     "rendering": {},
                 }
+        memory_context = dict(state.get("memory_context") or {})
+        if memory_context.get("task_id") and memory_context.get("task_root"):
+            service = TaskStore(memory_context["task_root"]).memory_service
+            memory_context["task_memory"] = service.apply_updates(
+                memory_context["task_id"], state["description"], understanding,
+                memory_context["memory_source_id"])
+            service.context_manifest(memory_context["task_id"], memory_context)
         criteria = normalize_acceptance_criteria(
             understanding.get("acceptance_criteria"),
             task_summary=understanding.get("task_summary") or state.get("description"),
             output_requirements=understanding.get("output_requirements"),
         )
         understanding = {**understanding, "acceptance_criteria": criteria}
+        contract = establish_contract(state, understanding)
+        understanding = apply_contract(understanding, contract)
+        criteria = contract['acceptance_criteria']
         duration = time.monotonic() - started
         emit_node_complete(
             "understand_task",
@@ -312,7 +405,7 @@ def _make_understand_task_node(provider):
             }
         )
         return _with_event(
-            {**state, "understanding": understanding, "acceptance_criteria": criteria},
+            {**state, "task_contract": contract, "memory_context": memory_context, "understanding": understanding, "acceptance_criteria": criteria},
             "understand_task",
             started,
             {"provider": type(provider).__name__ if provider else "precomputed"},
@@ -343,7 +436,8 @@ def _make_retrieve_algorithms_node(algorithm_registry):
         duration = time.monotonic() - started
         emit_node_complete("retrieve_algorithms", duration, {"match_count": len(summary)})
         return _with_event(
-            {**state, "retrieved_algorithms": matches},
+            {**state, "retrieved_algorithms": matches,
+             "memory_context": {**(state.get("memory_context") or {}), "procedural_memory": summary}},
             "retrieve_algorithms",
             started,
             {"match_count": len(summary), "matches": summary},
@@ -354,7 +448,7 @@ def _make_retrieve_algorithms_node(algorithm_registry):
 
 def _make_plan_candidates_node(max_candidates):
     def plan_candidates(state):
-        emit_node_start("plan_candidates", "生成候选算法方案")
+        emit_node_start("plan_candidates", "准备下一次实验")
         started = time.monotonic()
         candidates = plan_candidate_definitions(
             state["understanding"],
@@ -382,7 +476,7 @@ def _make_plan_candidates_node(max_candidates):
 
 
 def _execute_candidates(state):
-    emit_node_start("execute_candidates", "执行候选算法并生成结果")
+    emit_node_start("execute_candidates", "执行实验并保存中间产物")
     started = time.monotonic()
     result = run_planned_agent(
         target_image_path=state["target_image_path"],
@@ -390,13 +484,15 @@ def _execute_candidates(state):
         understanding=state["understanding"],
         output_root=state["output_root"],
         unit=state.get("unit", "pixel"),
-        max_candidates=state.get("max_candidates", 3),
+        max_candidates=state.get("max_candidates", 1),
         previous_state=state.get("previous_state"),
         retrieved_algorithms=state.get("retrieved_algorithms"),
         planned_candidates=state.get("planned_candidates"),
         run_dir=state.get("run_dir"),
         return_failure_state=True,
         ground_truth_mask_path=state.get("ground_truth_mask_path"),
+        max_calibration_candidates=state.get("max_calibration_candidates", 0),
+        task_contract=state.get("task_contract"),
     )
     experiment = {
         "iteration": result.get("iteration"),
@@ -449,7 +545,7 @@ def _decide_next_action(state):
 
 def _make_review_candidates_node(provider):
     def review_candidates(state):
-        emit_node_start("review_candidates", "评估候选结果质量")
+        emit_node_start("review_candidates", "检查实验结果与任务验收条件")
         started = time.monotonic()
         attempts = state.get("candidate_attempts", [])
         completed = [item for item in attempts if item.get("status") == "selected_for_review"]
@@ -459,7 +555,7 @@ def _make_review_candidates_node(provider):
                 "decision": "revise" if can_revise else "failed",
                 "selected_candidate": None,
                 "reason": (
-                    "这次没有识别到目标，正在自动换一种方法重试。"
+                    "本次实验没有生成可用结果，正在根据执行记录定位并修正问题。"
                     if can_revise
                     else "这次没有识别到目标，而且当前无法自动更换识别方法。"
                 ),
@@ -467,10 +563,9 @@ def _make_review_candidates_node(provider):
             }
         else:
             review = None
+            visual_available = False
             objective_review = _ground_truth_review(state, completed)
-            if objective_review is not None:
-                review = objective_review
-            elif provider is not None and hasattr(provider, "review_candidates") and completed:
+            if provider is not None and hasattr(provider, "review_candidates") and completed:
                 try:
                     review = _call_review_candidates(
                         provider,
@@ -478,14 +573,23 @@ def _make_review_candidates_node(provider):
                         state["description"],
                         completed,
                         reference_examples=state.get("reference_examples", []),
-                        acceptance_criteria=state.get("acceptance_criteria")
-                        or (state.get("understanding") or {}).get("acceptance_criteria"),
+                        acceptance_criteria={
+                            **(state.get("acceptance_criteria") or (state.get("understanding") or {}).get("acceptance_criteria") or {}),
+                            "rendering": (state.get("task_contract") or {}).get("rendering") or state.get("rendering"),
+                            "unit": (state.get("task_contract") or {}).get("unit"),
+                            "target_constraints": (state.get("task_contract") or {}).get("target_constraints"),
+                            "memory_contract": {key: ((state.get("memory_context") or {}).get("task_memory") or {}).get(key)
+                                                for key in ("current_goal", "active_constraints")},
+                        },
                     )
+                    visual_available = isinstance(review, dict) and review.get('decision') in {'present', 'revise'}
                 except Exception as exc:
+                    logger.warning("Graph operation recovered from exception", exc_info=True)
                     review = {
-                        "decision": "revise",
+                        "decision": "review_unavailable",
                         "selected_candidate": None,
                         "reason": f"视觉复查调用失败：{type(exc).__name__}: {exc}",
+                        "observed_issues": ["review_service_unavailable"],
                     }
             if not isinstance(review, dict):
                 review = {
@@ -496,7 +600,30 @@ def _make_review_candidates_node(provider):
                 }
         selected_name = review.get("selected_candidate")
         if selected_name not in {item.get("name") for item in completed}:
+            if completed and visual_available and review.get('decision') == 'present':
+                review = {**review, 'decision': 'revise', 'reason': '视觉复查未指出通过验收的有效实验。'}
             selected_name = state.get("selected_candidate")
+        selected = next((item for item in completed if item.get("name") == selected_name), None)
+        if selected is not None:
+            delivery = check_delivery(selected, state.get('task_contract') or {
+                'acceptance_criteria': state.get('acceptance_criteria') or {},
+                'target_constraints': (state.get('understanding') or {}).get('target_constraints') or {},
+            })
+            objective_review = _ground_truth_review({**state, 'selected_candidate': selected_name}, completed)
+            review['acceptance'] = {
+                'pixel_metrics': None if objective_review is None else objective_review['decision'] == 'present',
+                'delivery': delivery,
+                'visual_task_conditions': review.get('decision') == 'present' if visual_available else None,
+                'overall_passed': bool(visual_available and review.get('decision') == 'present'
+                    and delivery['passed'] and (objective_review is None or objective_review['decision'] == 'present')),
+            }
+            if not delivery['passed'] or (objective_review and objective_review['decision'] != 'present'):
+                review = {**review, 'decision': 'revise',
+                    'observed_issues': [*(review.get('observed_issues') or []), *delivery['issues'],
+                        *((objective_review or {}).get('observed_issues') or [])],
+                    'reason': (objective_review or {}).get('reason') or '交付结果不满足任务契约。'}
+            elif objective_review and not visual_available and review.get('decision') != 'review_unavailable':
+                review['reason'] = objective_review['reason'] + '任务及显示条件仍待人工验收。'
         merged = promote_candidate_result(
             {**state, "review": review},
             selected_name,
@@ -505,6 +632,7 @@ def _make_review_candidates_node(provider):
             **review,
             "selected_candidate": selected_name,
         }
+        merged = record_review(merged)
         duration = time.monotonic() - started
         emit_node_complete("review_candidates", duration, {
             "decision": review.get("decision"),
@@ -524,6 +652,8 @@ def _route_after_review(state):
     review = state.get("review") if isinstance(state.get("review"), dict) else {}
     revision_count = int(state.get("revision_count", 0))
     max_revisions = int(state.get("max_auto_revisions", 1))
+    if review.get("decision") == "review_unavailable":
+        return "present"
     if review.get("decision") == "revise":
         return "revise" if revision_count < max_revisions else "fail"
     if review.get("decision") == "failed":
@@ -532,12 +662,7 @@ def _route_after_review(state):
 
 
 def _ground_truth_review(state, completed):
-    """Make the ReAct decision from same-image Ground Truth metrics.
-
-    This path intentionally bypasses visual-model judgement: when a reference
-    mask is pixel-aligned, objective overlap is more reliable than another
-    interpretation of the same image.
-    """
+    """Pixel/instance checks only; task and delivery checks are combined by review."""
     if not state.get("ground_truth_mask_path"):
         return None
     selected_name = state.get("selected_candidate")
@@ -562,7 +687,7 @@ def _ground_truth_review(state, completed):
         f"{key}={float(evaluation.get(key, 0.0)):.3f}"
         for key in ("dice", "recall", "precision", "boundary_f1")
     )
-    if not failed:
+    if meets_ground_truth_gate(evaluation):
         return {
             "decision": "present",
             "selected_candidate": selected_name,
@@ -570,7 +695,11 @@ def _ground_truth_review(state, completed):
             "observed_issues": [],
             "revision_plan": [],
         }
+    if evaluation.get("count_error", 0) != 0:
+        failed.append('component_count')
     revisions = []
+    if 'component_count' in failed:
+        revisions.append('检查目标粘连与分离：候选连通域数量与 Ground Truth 不一致。')
     if "recall" in failed:
         revisions.append("漏检偏多：扩大目标响应范围，并检查最小面积与阈值。")
     if "precision" in failed:
@@ -596,15 +725,16 @@ def _route_after_revision(state):
 
 def _make_revise_candidates_node(provider, max_candidates):
     def revise_candidates(state):
-        emit_node_start("revise_candidates", "根据复查结果调整候选算法")
+        emit_node_start("revise_candidates", "根据证据修改下一版算法")
         started = time.monotonic()
         if provider is None or not hasattr(provider, "understand_task"):
             emit_node_complete("revise_candidates", time.monotonic() - started, {
                 "skipped": True,
                 "reason": "缺少 Vision Provider",
             })
-            return state
+            return {**state, 'planned_candidates': []}
         previous_state = {
+            "selected_experiment_id": state.get("selected_experiment_id"),
             "iteration": state.get("iteration", 0),
             "original_task_goal": state.get("original_task_goal")
             or (state.get("previous_state") or {}).get("original_task_goal")
@@ -612,6 +742,7 @@ def _make_revise_candidates_node(provider, max_candidates):
             "annotated_image_path": state.get("annotated_image_path"),
             "predicted_mask_path": state.get("predicted_mask_path"),
             "pipeline": state.get("pipeline", {}),
+            "task_contract": state.get("task_contract"),
             "quality_report": state.get("quality_report", {}),
             "evaluation_report": state.get("evaluation_report"),
             "ground_truth_mask_path": state.get("ground_truth_mask_path"),
@@ -632,19 +763,25 @@ def _make_revise_candidates_node(provider, max_candidates):
         execution_feedback = {
             "status": "needs_visual_revision" if has_completed_result else "no_usable_annotation",
             "instruction": (
-                "上一种方法已有标注，但视觉复查认为需要调整。请结合复查意见生成改进方法。"
+                "先检查复查指出的问题和相关中间产物，定位原因，再对当前方案作有依据的修改；说明修改和预期变化。"
                 if has_completed_result
-                else "上一种方法没有得到可用标注。分析每一步记录，生成不同的方法，不要原样重复。"
+                else "本次实验未生成可用结果。先分析执行错误和逐步记录，修复具体问题；只有证据表明方法不适用时才换方法。"
             ),
-            "attempts": state.get("candidate_attempts", []),
+            "attempts": revision_evidence(state),
             "review": state.get("review", {}),
         }
+        if int(state.get('revision_count', 0)) >= 1:
+            execution_feedback['instruction'] += " 连续修改后仍未通过，请重新检查错误假设；必要时提出另一种有依据的方法并按需比较。"
         try:
             understanding = _call_understand_task(
                 provider,
                 state["target_image_path"],
                 state["description"],
                 previous_context={
+                    **previous_state,
+                    **(state.get("memory_context") or {}),
+                    "experiment_output_root": state.get("output_root", "outputs"),
+                    "task_contract": state.get("task_contract"),
                     "previous_pipeline": state.get("pipeline", {}),
                     "previous_quality": state.get("quality_report", {}),
                     "previous_evaluation": state.get("evaluation_report"),
@@ -660,13 +797,12 @@ def _make_revise_candidates_node(provider, max_candidates):
                 reference_examples=state.get("reference_examples", []),
             )
         except Exception as exc:
+            logger.warning("Graph operation recovered from exception", exc_info=True)
             understanding = _fallback_understanding(state["description"], exc)
-        criteria = normalize_acceptance_criteria(
-            understanding.get("acceptance_criteria"),
-            task_summary=understanding.get("task_summary") or state.get("description"),
-            output_requirements=understanding.get("output_requirements"),
-        )
-        understanding = {**understanding, "acceptance_criteria": criteria}
+        # Automatic revision may change algorithms only, including after a failed model call.
+        contract = state.get("task_contract") or establish_contract(state, state.get("understanding") or {})
+        understanding = apply_contract(understanding, contract)
+        criteria = contract["acceptance_criteria"]
         candidates = plan_candidate_definitions(
             understanding,
             previous_state=previous_state,
@@ -680,9 +816,9 @@ def _make_revise_candidates_node(provider, max_candidates):
             if (
                 isinstance(attempt, dict)
                 and attempt.get("pipeline")
-                and attempt.get("status") in {
+                and (attempt.get("acceptance_status") == "rejected" or attempt.get("status") in {
                     "failed", "no_annotation", "health_failed", "duplicate_pipeline",
-                }
+                })
             )
         }
         candidates = [
@@ -692,7 +828,8 @@ def _make_revise_candidates_node(provider, max_candidates):
         result = {
             **state,
             "understanding": understanding,
-            "acceptance_criteria": criteria,
+            "acceptance_criteria": contract.get("acceptance_criteria", criteria),
+            "task_contract": contract,
             "planned_candidates": candidates,
             "previous_state": previous_state,
             "retrieved_algorithms": [],
@@ -725,8 +862,26 @@ def _report_failure(state):
     """
     emit_node_start("report_failure", "自动复查未通过，交由用户判断")
     started = time.monotonic()
-    attempts = int(state.get("revision_count", 0)) + 1
-    state = _promote_best_ground_truth_attempt(state)
+    attempts = sum(len(item.get('candidate_attempts', [])) for item in state.get('experiment_history', []))
+    baseline = compatible_baseline(state)
+    if baseline:
+        latest_attempts = state.get('candidate_attempts', [])
+        state = promote_candidate_result({**state, 'candidate_attempts': [baseline]}, baseline['name'])
+        state.update(candidate_attempts=latest_attempts, retained_experiment_id=baseline['experiment_id'])
+    # A failed revision must not erase a previously renderable candidate.
+    # Without Ground Truth this is a fallback, not a claim of higher accuracy.
+    if not baseline and not any(item.get("status") == "selected_for_review" for item in state.get("candidate_attempts", [])):
+        for experiment in reversed(state.get("experiment_history", [])):
+            usable = [item for item in experiment.get("candidate_attempts", [])
+                      if item.get("status") == "selected_for_review"
+                      and (Path(item.get("directory", "")) / "result_annotation.png").exists()]
+            if not usable:
+                continue
+            selected = next((item for item in usable if item.get("name") == experiment.get("selected_candidate")), usable[0])
+            promoted = promote_candidate_result({**state, "candidate_attempts": [selected]}, selected["name"])
+            state = {**promoted, "candidate_attempts": state.get("candidate_attempts", []),
+                     "retained_experiment_id": selected.get("experiment_id")}
+            break
     review = state.get("review") if isinstance(state.get("review"), dict) else {}
     had_result = any(
         item.get("status") == "selected_for_review"
@@ -735,8 +890,8 @@ def _report_failure(state):
     )
     reason = "结果没有满足当前任务的验收条件" if had_result else "没有生成可用结果"
     message = (
-        f"自动复查没有通过：{reason}。系统已经尝试了 {attempts} 种方法。"
-        "我仍会展示最后一版结果，请由你判断是否可用；可用则确认，不可用则继续修改。"
+        f"自动复查没有通过：{reason}。本次自动迭代已结束。"
+        + ("已回退到相同输入和验收条件下通过验证的版本。" if baseline else "展示保留的实验结果，仍需人工验收。")
     )
     decision = {
         "next_action": "wait_for_acceptance",
@@ -761,53 +916,6 @@ def _report_failure(state):
     })
     _write_trajectory(result)
     return result
-
-
-def _promote_best_ground_truth_attempt(state):
-    """Keep the strongest evaluated candidate across all ReAct iterations."""
-    if not state.get("ground_truth_mask_path"):
-        return state
-    evaluated = []
-    for experiment in state.get("experiment_history", []):
-        for attempt in experiment.get("candidate_attempts", []):
-            evaluation = (attempt.get("quality") or {}).get("evaluation") or {}
-            if attempt.get("status") == "selected_for_review" and evaluation.get("status") == "ok":
-                evaluated.append(attempt)
-    if not evaluated:
-        return state
-
-    def rank(attempt):
-        evaluation = (attempt.get("quality") or {}).get("evaluation") or {}
-        return tuple(float(evaluation.get(key, -1.0)) for key in (
-            "dice", "boundary_f1", "recall", "precision", "iou",
-        ))
-
-    selected = max(evaluated, key=rank)
-    current_evaluation = state.get("evaluation_report") or {}
-    selected_evaluation = (selected.get("quality") or {}).get("evaluation") or {}
-    if rank(selected) < tuple(float(current_evaluation.get(key, -1.0)) for key in (
-        "dice", "boundary_f1", "recall", "precision", "iou",
-    )):
-        return state
-    promoted = promote_candidate_result(
-        {**state, "candidate_attempts": [selected]},
-        selected.get("name"),
-    )
-    promoted["candidate_attempts"] = state.get("candidate_attempts", [])
-    promoted["conversation"] = [
-        {
-            "role": "assistant",
-            "content": f"自动重试完成，已保留 Ground Truth 指标最好的候选 {selected.get('name')}。",
-        },
-        {
-            "role": "assistant",
-            "content": (
-                f"本轮标出 {((selected.get('measurements') or {}).get('summary') or {}).get('count', 0)} 个区域，"
-                f"总面积 {((selected.get('measurements') or {}).get('summary') or {}).get('total_area', 0)} pixel。"
-            ),
-        },
-    ]
-    return promoted
 
 
 def _call_understand_task(provider, target_image_path, description, previous_context, reference_examples):
@@ -927,6 +1035,7 @@ def _wait_for_human(state):
         started,
         {"action": action, "has_feedback": bool(human_feedback)},
     )
+    result = record_human_review(result, response or {})
     emit_node_complete("wait_for_human", time.monotonic() - started, {
         "action": action,
         "has_feedback": bool(human_feedback),

@@ -18,8 +18,11 @@ def test_registry_exposes_only_registered_operators_and_validates_input_type():
 
     assert registry.names() == (
         "adaptive_threshold",
+        "apply_mask_constraint",
         "apply_valid_mask",
         "bilateral_denoise",
+        "build_periodic_background",
+        "build_periodic_valid_mask",
         "component_statistics",
         "convex_hull",
         "exclude_regions",
@@ -44,6 +47,8 @@ def test_registry_exposes_only_registered_operators_and_validates_input_type():
         "remove_small_objects",
         "residual_threshold",
         "statistical_threshold",
+        "subtract_periodic_background",
+        "threshold_residual",
         "unsharp_enhance",
     )
     with pytest.raises(KeyError, match="unknown operator"):

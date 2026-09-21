@@ -1,9 +1,12 @@
 from pathlib import Path
 import json
+import gradio as gr
+import pytest
 
 import numpy as np
 import pytest
 from PIL import Image
+from core.task_store import TaskStore
 from providers.vision import MockVisionProvider
 
 from ui.annotation_app import (
@@ -13,9 +16,11 @@ from ui.annotation_app import (
     _resolve_task_image,
     build_annotation_app,
     consume_chat_attachment_ui,
+    delete_chat_task,
     handle_result_action,
     load_latest_chat_task,
     resume_chat_task,
+    rename_chat_task,
     reset_chat_task,
     run_chat_agent,
     run_chat_agent_stream,
@@ -61,8 +66,35 @@ def test_candidate_progress_hides_technical_pipeline_details():
     })
 
     assert events[0]["label"] == "识别方法 1"
-    assert events[0]["detail"] == "这次没有找到目标，系统会自动换一种方法。"
+    assert events[0]["detail"] == "运行完成，未检出目标。"
     assert "adaptive_threshold" not in events[0]["detail"]
+
+
+def test_resume_renders_latest_progress_from_state_and_keeps_prior_history(monkeypatch):
+    from types import SimpleNamespace
+    from ui.annotation_app import resume_chat_task
+    from ui.utils.formatters import format_progress_card
+
+    old = {"role": "assistant", "content": format_progress_card([
+        {"label": "识别方法 1", "detail": "已经找到目标并生成标注。", "status": "failed"}
+    ])}
+    history = [old, {"role": "user", "content": "继续"}, dict(old)]
+    task = {"id": "task_example", "status": "accepted", "samples": []}
+    state = {"selected_candidate": "good", "candidate_attempts": [
+        {"name": "good", "status": "selected_for_review"}
+    ]}
+    monkeypatch.setattr("ui.annotation_app.TaskStore", lambda root: SimpleNamespace(
+        load_task=lambda task_id: task, load_messages=lambda task_id: list(history),
+        load_latest_state=lambda task_id: state))
+    monkeypatch.setattr("ui.annotation_app._task_rows", lambda *args, **kwargs: [])
+    messages = resume_chat_task("task_example")[0]
+    assert messages[:2] == history[:2]
+    assert "已验收" in messages[-1]["content"]
+    assert "icon-check" in messages[-1]["content"]
+    assert "icon-error" not in messages[-1]["content"]
+    assert "icon-error" in history[-1]["content"]
+    # 返回元组里的侧栏列表：无可展示任务时为空样本
+    assert resume_chat_task("task_example")[15]["samples"] == []
 
 
 def test_save_canvas_feedback_persists_composite_marks_and_state(tmp_path, monkeypatch):
@@ -132,7 +164,7 @@ def test_save_canvas_feedback_accumulates_green_marks_across_rounds(tmp_path, mo
     state = save_canvas_feedback(
         {"layers": [first], "background": str(background_path)},
         task,
-        {"annotated_image_path": str(background_path)},
+        {"annotated_image_path": str(background_path), "target_image_path": str(background_path), **__import__("core.input_contract", fromlist=["input_identity"]).input_identity(background_path)},
     )
 
     second = np.zeros((10, 10, 4), dtype=np.uint8)
@@ -141,7 +173,7 @@ def test_save_canvas_feedback_accumulates_green_marks_across_rounds(tmp_path, mo
     state = save_canvas_feedback(
         {"layers": [second], "background": str(background_path)},
         task,
-        {"annotated_image_path": str(background_path)},
+        {"annotated_image_path": str(background_path), "target_image_path": str(background_path), **__import__("core.input_contract", fromlist=["input_identity"]).input_identity(background_path)},
     )
 
     assert state["false_negative_pixel_count"] == 8
@@ -267,7 +299,8 @@ def test_feedback_event_js_preserves_gradio_input_order():
     assert signatures.count(
         "(action, image, history, task, state, prompt) => {"
     ) == 5
-    assert signatures.count("() => {") == 1
+    # 新建任务 / 恢复任务 / 页面加载也要收起修正画板，共 4 处无参关闭钩子。
+    assert signatures.count("() => {") == 4
     assert all("...args" not in signature for signature in signatures)
 
 
@@ -478,19 +511,97 @@ def test_stream_places_processing_state_in_assistant_message(monkeypatch):
     assert updates[-1][0][0] == {"role": "assistant", "content": "完成"}
 
 
-def test_stream_converts_failures_to_assistant_message(monkeypatch):
+def test_stream_converts_failures_to_assistant_message(monkeypatch, caplog):
     def fail(*args):
-        raise RuntimeError("candidate failed")
+        raise RuntimeError("candidate failed: Docker sandbox exceeded its timeout")
 
     monkeypatch.setattr("ui.annotation_app.run_chat_agent", fail)
 
     updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], None))
 
-    assert "这次没有处理成功" in updates[-1][0][-1]["content"]
-    assert "candidate failed" not in updates[-1][0][-1]["content"]
+    content = updates[-1][0][-1]["content"]
+    assert "这次没有处理成功" in content
+    # 失败原因要直接展示给用户，而不是只留一句兜底话。
+    assert "失败原因" in content
+    assert "candidate failed" in content
+    assert "candidate failed" in caplog.text
+    assert any(record.exc_info and record.exc_info[2] for record in caplog.records)
 
 
-def test_chat_agent_reports_qwen_failure_without_mock_fallback(tmp_path, monkeypatch):
+def test_stream_failure_message_includes_task_id(tmp_path, monkeypatch):
+    monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
+    task = reset_chat_task()[6]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("candidate failed")
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fail)
+
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], task))
+
+    content = updates[-1][0][-1]["content"]
+    assert f"任务 {task['id']}" in content
+    assert "candidate failed" in content
+
+
+def test_stream_failure_message_redacts_secrets(monkeypatch):
+    monkeypatch.setenv("LIANGCE_VISION_API_KEY", "supersecret123")
+
+    def fail(*args):
+        raise RuntimeError("provider rejected key supersecret123")
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fail)
+
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], None))
+
+    content = updates[-1][0][-1]["content"]
+    assert "supersecret123" not in content
+    assert "REDACTED" in content
+
+
+def test_stream_failure_message_is_truncated(monkeypatch):
+    long_reason = " ".join(["algorithm step failed"] * 80)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(long_reason)
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fail)
+
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], None))
+
+    content = updates[-1][0][-1]["content"]
+    assert "失败原因" in content
+    assert long_reason not in content
+    assert "…" in content
+
+
+def test_stream_failure_passes_through_gr_error_hint(monkeypatch):
+    def fail(*args):
+        raise gr.Error("请先点击 + 上传一张图片。")
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fail)
+
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], None))
+
+    content = updates[-1][0][-1]["content"]
+    assert "请先点击 + 上传一张图片。" in content
+    assert "这次没有处理成功" not in content
+
+
+def test_stream_explains_serialization_failure_and_logs_traceback(monkeypatch, caplog):
+    def fail(*args, **kwargs):
+        json.dumps({"mask": np.zeros((2, 2), dtype=bool)})
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fail)
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], None))
+
+    assert "数据格式" in updates[-1][0][-1]["content"]
+    assert "ndarray" not in updates[-1][0][-1]["content"]
+    assert "Object of type ndarray is not JSON serializable" in caplog.text
+    assert any(record.exc_info and record.exc_info[2] for record in caplog.records)
+
+
+def test_chat_agent_reports_planning_failure_without_mock_fallback(tmp_path, monkeypatch):
     source = tmp_path / "sample.png"
     Image.fromarray(np.zeros((16, 16), dtype=np.uint8), mode="L").save(source)
     monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
@@ -502,7 +613,7 @@ def test_chat_agent_reports_qwen_failure_without_mock_fallback(tmp_path, monkeyp
     task = reset_chat_task()[6]
     attachment, _, task = store_chat_attachment(str(source), task)
 
-    with pytest.raises(Exception, match="Qwen视觉理解失败"):
+    with pytest.raises(Exception, match="任务规划失败"):
         run_chat_agent(attachment, "提取亮色轮廓", [], task)
 
     record = json.loads(
@@ -518,21 +629,19 @@ def test_chat_agent_reports_qwen_failure_without_mock_fallback(tmp_path, monkeyp
 def test_reset_chat_task_clears_conversation_attachment_and_results():
     result = reset_chat_task()
 
-    assert result[0] == [
-        {
-            "role": "assistant",
-            "content": "新任务已创建。请点击 + 上传图片，然后描述希望 Agent 标注的目标或效果。",
-        }
-    ]
+    assert result[0] == []
     assert result[1]["visible"] is False
     assert result[2]["visible"] is False
     assert result[3]["visible"] is False
     assert result[5] is None
     assert result[6]["id"].startswith("task_")
     assert result[7] is None
-    assert result[8] == ""
+    # 新任务要恢复初始占位符，而不是沿用上一轮的追问文案。
+    assert result[8]["value"] == ""
+    assert "检测的目标" in result[8]["placeholder"]
     assert result[9] == ""
     assert result[10]["visible"] is False
+    assert result[17]["visible"] is False
 
 
 def test_consuming_attachment_clears_only_the_composer(tmp_path):
@@ -606,7 +715,9 @@ def test_resume_chat_task_restores_messages_sample_and_latest_state(tmp_path, mo
     assert restored[7] is None
     assert restored[9] == ""
     assert restored[10]["visible"] is True
-    assert restored[15]["value"] == task["id"]
+    # 第 16 位是侧栏任务列表：当前任务在列且带“当前”标记
+    assert restored[15]["samples"][0][0] == task["id"]
+    assert "当前" in restored[15]["samples"][0][2]
 
 
 def test_resume_draft_restores_an_unsent_attachment(tmp_path, monkeypatch):
@@ -634,3 +745,219 @@ def test_load_latest_chat_task_skips_newer_empty_drafts(tmp_path, monkeypatch):
 
     assert restored[6]["id"] == meaningful["id"]
     assert restored[6]["id"] != empty["id"]
+
+
+# ---- 上下文窗口用量徽章 ----
+
+
+def test_format_context_usage_empty_without_usage():
+    from ui.utils.formatters import format_context_usage
+
+    assert format_context_usage({}) == ""
+    assert format_context_usage({"last": {"prompt_tokens": 100}}) == ""
+    assert format_context_usage({"last": {"prompt_tokens": 100}, "window": 1000}) != ""
+
+
+def test_format_context_usage_levels_and_text():
+    from ui.utils.formatters import format_context_usage
+
+    state = {
+        "last": {"prompt_tokens": 34000, "completion_tokens": 200, "total_tokens": 34200},
+        "window": 131072,
+        "turn_tokens": 36000,
+        "model": "qwen3.7-plus",
+    }
+    html = format_context_usage(state)
+    assert "context-ok" in html
+    assert "26%" in html
+    assert "34.0K/131K" in html
+    assert "qwen3.7-plus" in html
+    assert "本轮累计 36,000" in html
+    assert 'width:26%' in html
+
+    state["last"]["prompt_tokens"] = 100000
+    assert "context-warning" in format_context_usage(state)
+
+    state["last"]["prompt_tokens"] = 125000
+    assert "context-danger" in format_context_usage(state)
+
+
+def test_merge_context_usage_accumulates_turn_tokens():
+    from ui.annotation_app import _merge_context_usage
+
+    usage_state = {}
+    _merge_context_usage(usage_state, {"type": "llm_request"})
+    assert usage_state == {}
+
+    _merge_context_usage(usage_state, {
+        "type": "llm_response",
+        "usage": {"prompt_tokens": 1000, "total_tokens": 1200},
+        "context_window": 131072,
+        "model": "qwen3.7-plus",
+    })
+    # 不带 usage 的事件（如 review 二次预览）不覆盖已积累的状态。
+    _merge_context_usage(usage_state, {"type": "llm_response", "content_preview": "x"})
+    _merge_context_usage(usage_state, {
+        "type": "llm_response",
+        "usage": {"prompt_tokens": 2000, "total_tokens": 2300},
+        "context_window": 131072,
+        "model": "qwen3.7-plus",
+    })
+
+    assert usage_state["last"]["prompt_tokens"] == 2000
+    assert usage_state["window"] == 131072
+    assert usage_state["model"] == "qwen3.7-plus"
+    assert usage_state["turn_tokens"] == 3500
+
+
+@pytest.mark.parametrize('configured', [None, '0'])
+def test_stream_completes_past_former_deadline(monkeypatch, configured):
+    from types import SimpleNamespace
+    from core.request_control import control
+
+    if configured is None:
+        monkeypatch.delenv('LIANGCE_REQUEST_TIMEOUT_SECONDS', raising=False)
+    else:
+        monkeypatch.setenv('LIANGCE_REQUEST_TIMEOUT_SECONDS', configured)
+    final_result = ([{'role': 'assistant', 'content': '完成'}], *tuple(range(1, 14)))
+
+    def fake_run(*args, **kwargs):
+        request = control.get()
+        monkeypatch.setattr('core.request_control.time', SimpleNamespace(monotonic=lambda: request.started + 601))
+        kwargs['progress_callback']({'type': 'thinking', 'message': '继续处理'})
+        return final_result
+
+    monkeypatch.setattr('ui.annotation_app.run_chat_agent', fake_run)
+    updates = list(run_chat_agent_stream('sample.png', '提取缺陷', [], None))
+    assert final_result[0][0] in updates[-1][0]
+    assert updates[-1][1:14] == final_result[1:]
+
+
+def test_closing_unlimited_stream_cancels_worker(monkeypatch):
+    import threading
+    from core.request_control import RequestCancelled, check_cancelled
+
+    monkeypatch.delenv('LIANGCE_REQUEST_TIMEOUT_SECONDS', raising=False)
+    stop_seen = threading.Event()
+    release = threading.Event()
+
+    def waiting(*args, **kwargs):
+        kwargs['progress_callback']({'type': 'thinking', 'message': '处理中'})
+        if release.wait(2):
+            try:
+                check_cancelled()
+            except RequestCancelled:
+                stop_seen.set()
+                raise
+        raise RuntimeError('Worker did not receive cancellation')
+
+    monkeypatch.setattr('ui.annotation_app.run_chat_agent', waiting)
+    stream = run_chat_agent_stream('sample.png', '提取缺陷', [], None)
+    try:
+        next(stream)  # Initial UI update, before the worker starts.
+        next(stream)  # Worker progress, inside the generator's try/finally.
+    finally:
+        stream.close()
+        release.set()
+    assert stop_seen.wait(2)
+
+
+def test_stream_yields_context_usage_as_fifteenth_element(monkeypatch):
+    final_result = (
+        [{"role": "assistant", "content": "完成"}],
+        *tuple(range(1, 14)),
+    )
+
+    def fake_run(*args, **kwargs):
+        kwargs["progress_callback"]({
+            "type": "llm_response",
+            "provider": "Aliyun",
+            "model": "qwen3.7-plus",
+            "content_preview": "x",
+            "usage": {"prompt_tokens": 34571, "completion_tokens": 218, "total_tokens": 34789},
+            "context_window": 131072,
+        })
+        return final_result
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fake_run)
+
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], {"id": "task"}))
+
+    assert all(len(update) == 15 for update in updates)
+    assert updates[0][14] is not None  # 尚无 usage：gr.update() 保持现状
+    final_topbar = updates[-1][14]
+    assert isinstance(final_topbar, str)
+    assert "annotation-topbar" in final_topbar
+    assert "上下文 26%" in final_topbar
+    assert "34.6K/131K" in final_topbar
+
+
+def test_stream_without_usage_keeps_topbar_unchanged(monkeypatch):
+    final_result = (
+        [{"role": "assistant", "content": "完成"}],
+        *tuple(range(1, 14)),
+    )
+
+    def fake_run(*args, **kwargs):
+        kwargs["progress_callback"]({"stage": "prepare", "label": "准备输入", "status": "completed"})
+        return final_result
+
+    monkeypatch.setattr("ui.annotation_app.run_chat_agent", fake_run)
+
+    updates = list(run_chat_agent_stream("sample.png", "提取缺陷", [], {"id": "task"}))
+
+    assert all(len(update) == 15 for update in updates)
+    # 无 usage 数据时第 15 元素是 gr.update()（保持顶栏现状），不是 HTML 字符串。
+    assert all(not isinstance(update[14], str) for update in updates)
+
+
+def test_page_load_starts_fresh_task_without_auto_resume():
+    # 页面打开始终是新任务；历史任务只能从侧栏手动选择恢复。
+    app = build_annotation_app()
+    wired = [
+        getattr(bf.fn, "__name__", "")
+        for bf in app.fns.values()
+        if getattr(bf, "fn", None) is not None
+    ]
+    assert "load_latest_chat_task" not in wired
+    assert wired.count("reset_chat_task") >= 1
+
+def test_rename_chat_task_updates_title_and_history(tmp_path, monkeypatch):
+    monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
+    task = reset_chat_task()[6]
+
+    updated, box_update, history = rename_chat_task("椭圆孔阵列量测", task)
+
+    assert updated["title"] == "椭圆孔阵列量测"
+    assert any(sample[1] == "椭圆孔阵列量测" for sample in history["samples"])
+
+
+def test_rename_chat_task_requires_open_task_and_new_name(tmp_path, monkeypatch):
+    monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
+    task = reset_chat_task()[6]
+
+    with pytest.raises(gr.Error):
+        rename_chat_task("   ", task)
+    with pytest.raises(gr.Error):
+        rename_chat_task("新名字", None)
+
+
+def test_delete_chat_task_two_step_confirm(tmp_path, monkeypatch):
+    monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
+    store = TaskStore(tmp_path / "tasks")
+    task = reset_chat_task()[6]
+    task_id = task["id"]
+    stale = [None] * 18
+
+    button_update, armed, *echo = delete_chat_task(False, task, *stale)
+    assert armed is True
+    assert echo == stale
+    store.load_task(task_id)
+
+    button_update, armed, *reset = delete_chat_task(True, task, *stale)
+    assert armed is False
+    with pytest.raises(FileNotFoundError):
+        store.load_task(task_id)
+    assert reset[6]["id"] != task_id
+    history = reset[15]
+    assert all(sample[0] != task_id for sample in history["samples"])

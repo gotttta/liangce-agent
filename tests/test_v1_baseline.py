@@ -88,10 +88,16 @@ def test_frozen_v1_baseline_is_complete_and_reproducible(tmp_path):
 
         regenerated_contour = tmp_path / f"{source.stem}_contour.png"
         save_annotated_image(source, measurements["results"], regenerated_contour, mask=first_mask)
-        assert np.array_equal(
-            _image_pixels(regenerated_contour),
-            _image_pixels(ROOT / record["artifacts"]["contour"]),
-        )
+        actual = _image_pixels(regenerated_contour)
+        frozen = _image_pixels(ROOT / record["artifacts"]["contour"])
+        # Audit #11 adds the clipped boundary at image edges; the historical
+        # segmentation and all interior rendering pixels remain unchanged.
+        assert np.array_equal(actual[1:-1, 1:-1], frozen[1:-1, 1:-1])
+        border = np.zeros(first_mask.shape, dtype=bool)
+        border[[0, -1], :] = True
+        border[:, [0, -1]] = True
+        assert np.all(actual[border & first_mask] == [255, 64, 48])
+        assert np.array_equal(actual[border & ~first_mask], frozen[border & ~first_mask])
 
         stored_segmentation = json.loads(
             (ROOT / record["artifacts"]["segmentation"]).read_text(encoding="utf-8")

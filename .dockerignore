@@ -1,0 +1,8 @@
+**
+!sandbox/
+!sandbox/Dockerfile
+!sandbox/requirements.txt
+!core/
+!core/**
+core/**/__pycache__/
+core/**/*.pyc

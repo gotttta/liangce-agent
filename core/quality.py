@@ -34,7 +34,10 @@ def mask_statistics(mask):
 
 def inspect_mask_health(mask, constraints=None):
     """Classify execution health without claiming that a mask is visually correct."""
-    facts = mask_statistics(mask)
+    array = np.asarray(mask)
+    if array.ndim != 2 or not array.size or not np.isfinite(array).all() or not np.isin(array, [0, 1]).all():
+        return {"issues": ["invalid_mask"], "usable_for_review": False}
+    facts = mask_statistics(array)
     constraints = constraints if isinstance(constraints, dict) else {}
     try:
         max_coverage = float(constraints.get("max_coverage", 0.35))
@@ -48,7 +51,7 @@ def inspect_mask_health(mask, constraints=None):
         max_components = None
     try:
         expected_count = int(constraints.get("expected_count"))
-        expected_count = expected_count if expected_count > 0 else None
+        expected_count = expected_count if expected_count >= 0 else None
     except (TypeError, ValueError):
         expected_count = None
     count_source = str(constraints.get("count_source") or "").strip().lower()
@@ -76,7 +79,8 @@ def inspect_mask_health(mask, constraints=None):
     return {
         **facts,
         "issues": issues,
-        "usable_for_review": not issues,
+        "diagnostics": list(issues),
+        "usable_for_review": True,
     }
 
 

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "name": "area_measurement",
+  "version": "1.0.0",
+  "description": "面积量测：目标提取、量测定义、结果证据与验收指导。模板只生成分割和几何证据，专用指标须实际计算。",
+  "applicability": {
+    "defect_types": [
+      "area",
+      "coverage",
+      "面积",
+      "占比"
+    ],
+    "background_types": [
+      "unknown"
+    ],
+    "measurement_types": [
+      "area_measurement",
+      "area",
+      "coverage",
+      "面积",
+      "占比"
+    ]
+  },
+  "instructions": [
+    "先确认量测对象、ROI、量测口径和单位；允许组合多个量测 Skill。",
+    "模板仅提供目标提取起点，不代表量测已完成。按原图选择亮暗极性、局部阈值或背景扣除；周期背景可组合周期算子。",
+    "检查原图叠加、阈值 Mask 和轮廓；不要为达到预期数量或尺寸而裁剪结果。默认不做形态学或面积过滤，以免改变尺寸或删除小目标。",
+    "缺少像素标定时只能报告 pixel / pixel²。当前标准运行时仅支持像素单位；不得把像素值直接标成物理单位。",
+    "每项量测必须有实际执行的计算与产物依据；缺少量测算子时可按工具协议构造并执行 generated_operators，未计算的指标报告未完成，不得由视觉猜测数值。",
+    "明确孔洞是否扣除、边界目标是否纳入、面积占比分母是完整图像还是有效 ROI。",
+    "按目标 Mask 的真实像素数计算单目标面积、总面积及占比；不要用边界框面积替代目标面积。",
+    "核对目标分割完整性与重叠计数；需要保留小目标时同步调整正式量测阶段的 min_area，避免提取后再次被过滤。"
+  ],
+  "required_operators": [
+    "normalize",
+    "global_threshold",
+    "component_statistics",
+    "extract_contours"
+  ],
+  "verification": {
+    "max_coverage": 1.0,
+    "requires_mask": true,
+    "checks": [
+      "calibration_and_units",
+      "overlay_review",
+      "hole_policy",
+      "roi_denominator",
+      "component_area_sum"
+    ]
+  },
+  "pipeline_template": {
+    "schema_version": 3,
+    "name": "area_measurement",
+    "nodes": [
+      {
+        "id": "normalized",
+        "operator": "normalize",
+        "inputs": {
+          "image": "$image"
+        },
+        "params": {
+          "lower_percentile": 0,
+          "upper_percentile": 100
+        }
+      },
+      {
+        "id": "final_mask",
+        "operator": "global_threshold",
+        "inputs": {
+          "image": "normalized"
+        },
+        "params": {
+          "polarity": "bright",
+          "sensitivity": 1.8,
+          "max_coverage": 1.0
+        }
+      },
+      {
+        "id": "statistics",
+        "operator": "component_statistics",
+        "inputs": {
+          "mask": "final_mask"
+        },
+        "params": {}
+      },
+      {
+        "id": "contours",
+        "operator": "extract_contours",
+        "inputs": {
+          "mask": "final_mask"
+        },
+        "params": {}
+      }
+    ],
+    "outputs": {
+      "mask": "final_mask",
+      "contours": "contours"
+    }
+  }
+}

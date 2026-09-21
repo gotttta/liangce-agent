@@ -1,3 +1,4 @@
+from core.runtime_logging import logged_operation
 import argparse
 import json
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from core.agent_graph import run_agent_graph
 from providers.vision import build_runtime_provider
 
 
+@logged_operation("run")
 def run(args):
     provider = build_runtime_provider()
     state = run_agent_graph(
@@ -15,6 +17,8 @@ def run(args):
         output_root=args.output_root,
         unit=args.unit,
         provider=provider,
+        task_id=getattr(args, "task_id", None),
+        thread_id=getattr(args, "thread_id", None),
         reference_examples=[{"image_path": path, "description": "甲方Handbook标注示例图"} for path in (args.reference or [])],
     )
     return Path(state["run_dir"]), state_to_output(state)
@@ -22,6 +26,8 @@ def run(args):
 
 def state_to_output(state):
     return {
+        "task_id": state.get("task_id"),
+        "graph_thread_id": state.get("graph_thread_id"),
         "defect_type": state["strategy"]["defect_type"],
         "measurement_type": state["strategy"]["measurement_type"],
         "unit": state["measurements"]["summary"]["unit"],
@@ -53,6 +59,8 @@ def parse_args():
         action="append",
         help="Handbook annotated example image; repeat for multiple few-shot references",
     )
+    parser.add_argument("--task-id", help="Continue the memory of an existing task")
+    parser.add_argument("--thread-id", help="Recover an existing graph run with unchanged input and request")
     parser.add_argument("--unit", default="pixel", help="Metrology unit, defaults to pixel")
     parser.add_argument("--output-root", default="outputs", help="Directory for run outputs")
     return parser.parse_args()
@@ -70,6 +78,8 @@ def run_from_paths(target, description, reference=None, unit="pixel", output_roo
 
 
 def main():
+    from core.runtime_logging import configure_logging
+    configure_logging()
     run_dir, output = run(parse_args())
     print(f"Output written to: {run_dir}")
     print(json.dumps(output["summary"], indent=2, ensure_ascii=False))

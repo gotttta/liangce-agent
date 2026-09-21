@@ -1,10 +1,10 @@
 # Liangce Agent Handover
 
-更新时间：2026-08-18
+更新时间：2026-09-09
 
 ## 当前产品决策
 
-当前流程不使用 Ground Truth，也不自动计算准确率或候选质量分数。算法由视觉 Agent 自主生成、执行和复查，最终由用户查看结果后确认。
+当前流程默认不使用 Ground Truth，只记录事实统计；用户上传同图 Ground Truth 标注时，运行时计算 Ground Truth 指标用于候选排序和门禁（校准候选预算 `max_calibration_candidates` 默认 6，设为 0 关闭校准候选）。算法由视觉 Agent 自主生成、执行和复查，最终由用户查看结果后确认。
 
 Handbook 中甲方已经标注的图片作为 few-shot 视觉参考，只用于学习：
 
@@ -28,14 +28,14 @@ Handbook 中甲方已经标注的图片作为 few-shot 视觉参考，只用于�
       -> Qwen 生成候选算法
       -> 本地 DSL 校验和沙箱执行
       -> Qwen 视觉复查并选择候选
-      -> 明确要求 revise 时最多自动重试一轮
+      -> 明确要求 revise 时最多自动重试两轮（max_auto_revisions 默认 2）
       -> 等待用户确认
   ```
 
-- 用户点击确认后保存完整 Pipeline 和算法记录，不保存人工标准 mask。
+- 用户点击确认后保存完整 Pipeline 和算法记录；可选上传的同图 Ground Truth 标注单独保存在任务目录 `ground_truth/`，不写入验收记录。
 - 算子库默认为空。生成的自定义算子只属于当前候选，不会自动进入可复用算子库。
 - 只有用户明确测试批准后，算子才允许通过 `OperatorLibrary.publish(..., user_tested=True, tested_by=...)` 发布。
-- 旧的 Ground Truth 保存 API、对应 UI 入口和测试已删除。
+- Web UI 提供可选的同图 Ground Truth 标注上传，参与候选评估、排序和门禁；关闭校准候选不会关闭 Ground Truth 排序和复查。
 - 项目文档已改为“用户确认与算法发布”流程。
 
 ## 重要入口
@@ -57,7 +57,7 @@ Handbook 中甲方已经标注的图片作为 few-shot 视觉参考，只用于�
 ./.venv/bin/python -m pytest -q
 ```
 
-当前验证结果：`115 passed`。
+当前验证结果：`191 passed`。
 
 启动 Web UI：
 
@@ -87,6 +87,10 @@ CLI 示例：
 - `measurements.json`
 - `agent_trajectory.json`
 - `graph_state.json`
+- `candidate_summary.json`
+- `candidate_budget.json`
+- `runtime_environment.json`
+- `evaluation_report.json`（提供同图 Ground Truth 时写入）
 
 用户确认后的算法写入 `workspace/algorithms/<algorithm_id>/algorithm.json`。算子库目录为 `workspace/operators/`，没有用户测试批准时应保持没有可复用自定义算子。
 
@@ -103,7 +107,7 @@ PYTHONPATH=. .venv/bin/python scripts/migrate_accepted_algorithms.py --dry-run
 ## 兼容性和残留
 
 - `reference_annotation_path` 参数仍保留在部分旧 API 中，用于兼容旧调用；当前语义只是参考图，不是 Ground Truth。
-- `core/measurement/evaluation.py` 和部分旧评估测试仍存在，当前主 Agent 流程不调用它们。若后续要求彻底移除所有旧评估能力，再单独删除该模块和对应测试。
+- `core/measurement/evaluation.py` 在任务提供同图 Ground Truth 时被主 Agent 流程调用，用于候选评估、Ground Truth 门禁和排序。
 - `data/`、`workspace/`、输出目录中可能有历史任务和样例，不要为了清理术语而删除用户数据。
 - 当前工作区是未提交的开发状态，包含本轮 Agent v2 大量新增和修改文件。新窗口开始时先运行 `git status --short`，不要重置或覆盖已有改动。
 
@@ -112,4 +116,4 @@ PYTHONPATH=. .venv/bin/python scripts/migrate_accepted_algorithms.py --dry-run
 1. 用真实 Handbook 示例跑一次 Web UI，确认 Qwen 能正确理解示例语义和边界风格。
 2. 检查用户确认后的 `algorithm.json` 是否包含足够的回放信息。
 3. 设计单独的“测试算子并批准”界面或 CLI；在此之前不要向 `workspace/operators/` 发布任何算子。
-4. 后续若要彻底移除 Ground Truth 旧代码，先评估 `core/measurement/evaluation.py`、`data/benchmarks/` 和历史文档的兼容需求。
+4. 独立效果评估时不要向图提供同图 Ground Truth；关闭校准候选（`max_calibration_candidates=0`）不会关闭 Ground Truth 排序和复查。

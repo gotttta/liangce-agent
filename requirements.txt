@@ -1,9 +1,10 @@
 numpy
 Pillow
 opencv-python-headless
-scikit-image
+scikit-image>=0.23
 langgraph
 openai
 gradio<6
 huggingface-hub<1.0
-pytest
+
+langgraph-checkpoint-sqlite==3.0.3

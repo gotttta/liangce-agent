@@ -23,6 +23,8 @@ def launch_kwargs():
 
 
 def main():
+    from core.runtime_logging import configure_logging
+    configure_logging()
     configure_gradio_environment()
     build_app().launch(**launch_kwargs())
 

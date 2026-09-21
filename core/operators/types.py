@@ -19,9 +19,18 @@ class ImageArtifact:
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        array = _validate_2d(self.data, "image")
+        array = np.asarray(self.data)
+        if not array.size or not (array.ndim == 2 or (array.ndim == 3 and array.shape[2] in (3, 4))):
+            raise ValueError("image must be grayscale, RGB or RGBA")
         if not np.issubdtype(array.dtype, np.number):
             raise TypeError("image data must be numeric")
+        if not np.isfinite(array).all():
+            raise ValueError("image data must be finite")
+        self.metadata = dict(self.metadata)
+        self.metadata.setdefault("color_space", "RGB" if array.ndim == 3 else "gray")
+        self.metadata.setdefault("purpose", "display" if array.dtype == np.uint8 or array.ndim == 3 else "intensity")
+        if array.dtype == np.uint8 or array.ndim == 3:
+            self.metadata.setdefault("display_range", [0, 255])
         self.data = array.astype(np.float32, copy=False)
 
 
@@ -31,7 +40,10 @@ class MaskArtifact:
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        self.data = _validate_2d(self.data, "mask").astype(bool, copy=False)
+        array = _validate_2d(self.data, "mask")
+        if not np.isfinite(array).all() or not np.isin(array, [0, 1]).all():
+            raise ValueError("mask data must be finite and binary")
+        self.data = array.astype(bool, copy=False)
 
 
 @dataclass

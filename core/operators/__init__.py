@@ -16,6 +16,7 @@ from core.operators.types import (
     MetadataArtifact,
     OperatorResult,
 )
+from core.operator_catalog import apply_operator_catalog
 
 
 def build_default_registry(generated_operators=None):
@@ -25,7 +26,7 @@ def build_default_registry(generated_operators=None):
     register_defect_operators(registry)
     for spec in generated_operators or ():
         register_generated_operator(registry, spec)
-    return registry
+    return apply_operator_catalog(registry)
 
 
 __all__ = [

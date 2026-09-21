@@ -27,8 +27,9 @@ class AlgorithmRegistry:
         algorithm_id = f"algorithm_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}"
         algorithm_dir = self.root / algorithm_id
         algorithm_dir.mkdir(parents=True, exist_ok=False)
+        manual_constraints = _manual_constraints(state)
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "id": algorithm_id,
             "status": "accepted",
             "created_at": utc_now(),
@@ -46,6 +47,11 @@ class AlgorithmRegistry:
             "quality_report": state.get("quality_report", {}),
             "measurement_summary": state.get("measurements", {}).get("summary", {}),
             "acceptance_note": note,
+            # A user can accept a result after painting required/excluded
+            # pixels. Those edits are outside the Pipeline, so they must not
+            # be presented later as a standalone replayable algorithm.
+            "manual_constraints": manual_constraints,
+            "replayable_without_manual_constraints": not bool(manual_constraints),
             "artifacts": {
                 "run_dir": state.get("run_dir"),
                 "annotated_image_path": state.get("annotated_image_path"),
@@ -67,12 +73,17 @@ class AlgorithmRegistry:
                 continue
             algorithms.append({**payload, "path": str(path)})
         algorithms.sort(key=lambda item: item.get("created_at", ""), reverse=True)
-        return algorithms[: max(1, int(limit))]
+        return algorithms if limit is None else algorithms[: max(1, int(limit))]
 
-    def search(self, understanding, limit=3, min_score=0.2):
+    def search(self, understanding, limit=3, min_score=0.2, include_manual_constraints=False):
         query = self._query_features(understanding)
         matches = []
-        for algorithm in self.list_algorithms():
+        for algorithm in self.list_algorithms(limit=None):
+            if (
+                not include_manual_constraints
+                and not algorithm.get("replayable_without_manual_constraints", True)
+            ):
+                continue
             score, reasons = self._score(query, algorithm)
             if score < float(min_score):
                 continue
@@ -148,3 +159,21 @@ class AlgorithmRegistry:
             encoding="utf-8",
         )
         temporary.replace(path)
+
+
+def _manual_constraints(state):
+    feedback = state.get("human_feedback") if isinstance(state.get("human_feedback"), dict) else {}
+    constraints = {}
+    legacy = state.get("feedback") if isinstance(state.get("feedback"), dict) else {}
+    aliases = {
+        "include_mask_path": ("include_mask_path", "false_negative_mask_path"),
+        "exclude_mask_path": ("exclude_mask_path", "false_positive_mask_path"),
+    }
+    for key, fallback_keys in aliases.items():
+        value = next(
+            (source.get(name) for source in (state, feedback, legacy) for name in fallback_keys if source.get(name)),
+            None,
+        )
+        if value:
+            constraints[key] = str(value)
+    return constraints

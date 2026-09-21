@@ -3,7 +3,7 @@ from PIL import Image, ImageDraw
 
 
 def save_mask_image(mask, output_path):
-    image = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
+    image = Image.fromarray(mask.astype(np.uint8) * 255)
     image.save(output_path)
 
 
@@ -21,7 +21,8 @@ def save_annotated_image(
     color = _parse_color(contour_color)
     if not isinstance(contour_thickness, int) or not 1 <= contour_thickness <= 10:
         raise ValueError("contour_thickness must be an integer between 1 and 10")
-    image = Image.open(source_path).convert("RGB")
+    from core.input_contract import display_image, load_pixels
+    image = display_image(load_pixels(source_path))
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -29,7 +30,7 @@ def save_annotated_image(
         alpha = max(0, min(255, int(mask_alpha)))
         mask_array = np.asarray(mask, dtype=bool)
         fill = Image.new("RGBA", image.size, (*color, alpha))
-        mask_layer = Image.fromarray((mask_array.astype(np.uint8) * 255), mode="L")
+        mask_layer = Image.fromarray(mask_array.astype(np.uint8) * 255)
         overlay = Image.composite(fill, overlay, mask_layer)
         annotated = Image.alpha_composite(image.convert("RGBA"), overlay)
         annotated.convert("RGB").save(output_path)
@@ -86,5 +87,9 @@ def _mask_boundary(mask):
     boundary[:-1, :] |= binary[:-1, :] & ~binary[1:, :]
     boundary[:, 1:] |= binary[:, 1:] & ~binary[:, :-1]
     boundary[:, :-1] |= binary[:, :-1] & ~binary[:, 1:]
+    boundary[0, :] |= binary[0, :]
+    boundary[-1, :] |= binary[-1, :]
+    boundary[:, 0] |= binary[:, 0]
+    boundary[:, -1] |= binary[:, -1]
     rows, columns = np.nonzero(boundary)
     return list(zip(columns, rows))

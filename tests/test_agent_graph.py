@@ -173,6 +173,7 @@ def test_agent_graph_promotes_candidate_selected_by_visual_review(tmp_path):
         output_root=tmp_path / "outputs",
         understanding=understanding,
         provider=ReviewingProvider(),
+        max_candidates=2,
     )
 
     assert state["selected_candidate"] == "review_selected"
@@ -191,7 +192,11 @@ def test_agent_graph_runs_one_bounded_revision_when_review_requests_it(tmp_path)
 
         def understand_task(self, target_image_path, description, previous_context=None):
             assert previous_context["review"]["decision"] == "revise"
-            return understanding
+            revised = _understanding()
+            revised['candidate_pipelines'][0]['pipeline'] = strategy_to_pipeline({
+                'segmentation': {'method': 'bright_threshold', 'sensitivity': 0.5, 'min_area_px': 2},
+            })
+            return revised
 
         def review_candidates(self, target_image_path, description, candidates):
             self.review_count += 1
@@ -344,6 +349,8 @@ def test_agent_graph_automatically_replans_after_empty_annotation(tmp_path):
         },
     }]
 
+    initial['target_constraints'] = {'allow_empty': False}
+
     class RetryProvider:
         def __init__(self):
             self.contexts = []
@@ -366,9 +373,9 @@ def test_agent_graph_automatically_replans_after_empty_annotation(tmp_path):
     assert state["revision_count"] == 1
     assert state["iteration"] == 1
     assert state["measurements"]["summary"]["count"] == 1
-    assert provider.contexts[0]["execution_feedback"]["status"] == "no_usable_annotation"
+    assert provider.contexts[0]["execution_feedback"]["status"] == "needs_visual_revision"
     failed_attempt = provider.contexts[0]["execution_feedback"]["attempts"][0]
-    assert failed_attempt["status"] == "no_annotation"
+    assert failed_attempt["status"] == "selected_for_review"
     assert failed_attempt["operator_trace"][0]["operator"] == "global_threshold"
     nodes = [event["node"] for event in state["trajectory"]]
     assert nodes.count("execute_candidates") == 2
@@ -392,6 +399,8 @@ def test_agent_graph_reports_plain_message_after_retry_limit(tmp_path):
         },
     }]
 
+    empty["target_constraints"] = {"allow_empty": False}
+
     class AlwaysEmptyProvider:
         def understand_task(self, target_image_path, description, previous_context=None):
             return empty
@@ -411,6 +420,7 @@ def test_agent_graph_reports_plain_message_after_retry_limit(tmp_path):
     assert state["measurements"]["summary"]["count"] == 0
     assert Path(state["annotated_image_path"]).exists()
     assert Path(state["predicted_mask_path"]).exists()
+    assert state["interrupt"][0]["value"]["kind"] == "human_review"
 
 
 def test_ground_truth_revision_does_not_union_the_rejected_previous_mask(tmp_path):
@@ -502,7 +512,9 @@ def test_ground_truth_retry_limit_preserves_best_metrics_in_final_state(tmp_path
     assert state["status"] == "needs_human_review"
     assert state["evaluation_report"]["dice"] == round(2 / 3, 6)
     assert state["evaluation_report"] == state["quality_report"]["evaluation"]
-    assert "Ground Truth 指标最好的候选" in state["conversation"][0]["content"]
+    assert not state['review']['acceptance']['overall_passed']
+    assert state.get('verified_baseline') is None
+    assert "Ground Truth 指标最好" not in state["conversation"][0]["content"]
 
 
 def test_agent_graph_retrieves_accepted_algorithm_as_candidate(tmp_path):

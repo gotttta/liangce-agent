@@ -93,3 +93,32 @@ def test_registry_reuses_accepted_generated_operator_with_pipeline(tmp_path):
 
     assert matches[0]["pipeline"]["generated_operators"][0]["name"] == "texture_mask"
     assert published["pipeline"]["generated_operators"]
+
+
+def test_registry_does_not_reuse_an_algorithm_accepted_with_manual_constraints(tmp_path):
+    registry = AlgorithmRegistry(tmp_path / "algorithms")
+    state = _accepted_state()
+    state["human_feedback"] = {"include_mask_path": "/tmp/include.png"}
+    published = registry.publish("task_source", state)
+
+    query = {"target_defect": "particle", "recommended_strategy": state["strategy"]}
+    assert published["replayable_without_manual_constraints"] is False
+    assert registry.search(query) == []
+    constrained = registry.search(query, include_manual_constraints=True)
+    assert constrained[0]["algorithm_id"] == published["id"]
+
+
+def test_search_includes_best_match_older_than_display_limit(tmp_path):
+    registry = AlgorithmRegistry(tmp_path / "algorithms")
+    state = _accepted_state()
+    oldest = registry.publish("old", state)
+    for index in range(101):
+        unrelated = _accepted_state()
+        unrelated["description"] = "different task"
+        unrelated["strategy"] = {"defect_type": "scratch", "measurement_type": "length"}
+        registry.publish(str(index), unrelated)
+    assert len(registry.list_algorithms()) == 100
+    assert oldest["id"] not in {item["id"] for item in registry.list_algorithms()}
+    matches = registry.search({"recommended_strategy": state["strategy"]}, limit=1)
+    assert len(matches) == 1
+    assert matches[0]["algorithm_id"] == oldest["id"]

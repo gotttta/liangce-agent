@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from copy import deepcopy
 import inspect
 import time
 from typing import Optional
@@ -9,39 +10,18 @@ from core.operators import (
     ContourArtifact,
     ImageArtifact,
     MaskArtifact,
+    MetadataArtifact,
     build_default_registry,
     normalize_generated_operators,
 )
 from core.quality import mask_statistics
+from core.operator_catalog import model_visible_operator_names
 
 
 BUILTIN_PIPELINE_NAMES = {"periodic_particle_builtin"}
 
 
-ALLOWED_PIPELINE_OPERATORS = {
-    "adaptive_threshold",
-    "bilateral_denoise",
-    "component_statistics",
-    "convex_hull",
-    "hysteresis_threshold",
-    "invert_intensity",
-    "local_contrast",
-    "local_background_residual",
-    "median_denoise",
-    "morphological_residual",
-    "normalize",
-    "percentile_clip",
-    "gaussian_denoise",
-    "global_threshold",
-    "morphology",
-    "fill_holes",
-    "filter_components",
-    "extract_contours",
-    "remove_border_components",
-    "remove_small_objects",
-    "statistical_threshold",
-    "unsharp_enhance",
-}
+ALLOWED_PIPELINE_OPERATORS = model_visible_operator_names()
 
 OPERATOR_DESCRIPTIONS = {
     "adaptive_threshold": "按局部邻域阈值分割，适合晶圆图像中的不均匀照明。",
@@ -72,38 +52,118 @@ OPERATOR_DESCRIPTIONS = {
 @dataclass
 class PipelineExecutionResult:
     pipeline: dict
-    mask: MaskArtifact
+    mask: Optional[MaskArtifact]
     contours: Optional[ContourArtifact]
     trace: tuple
     artifacts: dict
+    outputs: dict = field(default_factory=dict)
 
 
 def pipeline_operator_catalog(registry=None, generated_operators=None, include_builtin=True):
-    """Return operator contracts, optionally excluding unapproved built-ins.
-
-    Built-ins remain available to replay existing accepted pipelines, but they
-    are not automatically advertised to the model as approved reusable tools.
-    """
+    """Return the model-visible v3 operator catalog from the execution registry."""
     if not include_builtin:
         return []
     registry = registry or build_default_registry(generated_operators)
     catalog = []
-    for name in sorted(ALLOWED_PIPELINE_OPERATORS):
+    for name in registry.names():
         definition = registry.definition(name)
+        if not definition.model_visible:
+            continue
         parameters = []
         for parameter in inspect.signature(definition.function).parameters.values():
-            if parameter.name in {"image", "mask"}:
+            if parameter.name in definition.input_ports:
                 continue
             default = None if parameter.default is inspect.Parameter.empty else parameter.default
             parameters.append({"name": parameter.name, "default": default})
         catalog.append({
             "name": name,
-            "description": OPERATOR_DESCRIPTIONS.get(name, "可复用的自定义 CV 算子"),
+            "version": definition.version,
+            "description": definition.description or OPERATOR_DESCRIPTIONS.get(name, "可复用的自定义 CV 算子"),
             "input_artifact": definition.input_type.__name__,
             "output_artifact": definition.output_type.__name__,
+            "input_ports": {
+                port: artifact_type.__name__
+                for port, artifact_type in definition.input_ports.items()
+            },
             "parameters": parameters,
         })
     return catalog
+
+
+def _canonical_pipeline_names(pipeline):
+    """Read legacy field names, emitting only the Operator vocabulary."""
+    if not isinstance(pipeline, dict):
+        return pipeline
+    pipeline = deepcopy(pipeline)
+    if "tool_versions" in pipeline:
+        legacy = pipeline.pop("tool_versions")
+        if "operator_versions" in pipeline and pipeline["operator_versions"] != legacy:
+            raise ValueError("conflicting operator_versions and legacy tool_versions")
+        pipeline["operator_versions"] = legacy
+    if isinstance(pipeline.get("nodes"), list):
+        for node in pipeline["nodes"]:
+            if not isinstance(node, dict):
+                continue
+            for alias in ("tool", "op"):
+                if alias in node:
+                    legacy = node.pop(alias)
+                    if "operator" in node and node["operator"] != legacy:
+                        raise ValueError("conflicting pipeline operator names")
+                    node["operator"] = legacy
+    return pipeline
+
+
+def pin_pipeline_operator_versions(pipeline, registry=None):
+    """Return a replay record with the exact Operator versions used by this run."""
+    pipeline = _canonical_pipeline_names(pipeline)
+    if not isinstance(pipeline, dict):
+        raise ValueError("pipeline must be an object")
+    validate_pipeline(pipeline, registry=registry)
+    pinned = deepcopy(pipeline)
+    if "operator_versions" in pinned:
+        return pinned
+    pinned["version_provenance"] = "recorded_at_execution"
+    if is_builtin_pipeline(pinned):
+        pinned["operator_versions"] = {pinned.get("name", "builtin_pipeline"): "legacy-1.0.0"}
+        return pinned
+    generated_specs = pinned.get("generated_operators") or []
+    registry = registry or build_default_registry(generated_specs)
+    entries = pinned.get("nodes") if is_v3_pipeline(pinned) else pinned.get("steps", [])
+    versions = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("operator") or entry.get("op")
+        if name in registry.names():
+            versions[name] = registry.definition(name).version
+    pinned["operator_versions"] = dict(sorted(versions.items()))
+    return pinned
+
+
+def pin_pipeline_tool_versions(pipeline, registry=None):
+    """Compatibility alias; new callers use pin_pipeline_operator_versions."""
+    return pin_pipeline_operator_versions(pipeline, registry=registry)
+
+
+def _validate_operator_versions(pipeline, expected):
+    if "operator_versions" not in pipeline:
+        return
+    recorded = pipeline["operator_versions"]
+    if not isinstance(recorded, dict) or set(recorded) != set(expected):
+        raise ValueError("pipeline operator_versions must cover exactly the executed operators")
+    for name, version in expected.items():
+        if recorded[name] != version:
+            raise ValueError(
+                f"pipeline operator version mismatch for {name}: "
+                f"recorded {recorded[name]!r}, installed {version!r}; explicit migration required"
+            )
+
+
+def _preserve_replay_metadata(raw, normalized):
+    for key in ("operator_versions", "skill", "version_provenance"):
+        if key in raw:
+            normalized[key] = deepcopy(raw[key])
+    return normalized
 
 
 def strategy_to_pipeline(strategy, name="qwen_strategy_baseline"):
@@ -151,16 +211,36 @@ def strategy_to_pipeline(strategy, name="qwen_strategy_baseline"):
 
 
 def normalize_pipeline(raw_pipeline, fallback_strategy=None, name="candidate"):
+    raw_pipeline = _canonical_pipeline_names(raw_pipeline)
     if isinstance(raw_pipeline, dict) and raw_pipeline.get("kind") == "builtin_pipeline":
         builtin_name = str(raw_pipeline.get("name") or name)
         if builtin_name not in BUILTIN_PIPELINE_NAMES:
             raise ValueError(f"unsupported builtin pipeline: {builtin_name}")
         params = raw_pipeline.get("params")
-        return {
+        return _preserve_replay_metadata(raw_pipeline, {
             "name": builtin_name,
             "kind": "builtin_pipeline",
             "params": dict(params) if isinstance(params, dict) else {},
+        })
+    if isinstance(raw_pipeline, dict) and (
+        raw_pipeline.get("schema_version") == 3 or "nodes" in raw_pipeline
+    ):
+        if not isinstance(raw_pipeline.get("nodes"), list) or not raw_pipeline.get("nodes"):
+            raise ValueError("v3 candidate pipeline must contain non-empty nodes")
+        normalized = {
+            "schema_version": 3,
+            "name": str(raw_pipeline.get("name") or name),
+            "nodes": [_normalize_pipeline_node(node) for node in raw_pipeline["nodes"] if isinstance(node, dict)],
         }
+        if isinstance(raw_pipeline.get("input_types"), dict):
+            normalized["input_types"] = dict(raw_pipeline["input_types"])
+        if isinstance(raw_pipeline.get("outputs"), dict):
+            normalized["outputs"] = dict(raw_pipeline["outputs"])
+        if raw_pipeline.get("generated_operators") is not None:
+            normalized["generated_operators"] = [
+                spec.as_dict() for spec in normalize_generated_operators(raw_pipeline.get("generated_operators"))
+            ]
+        return _preserve_replay_metadata(raw_pipeline, normalized)
     if not isinstance(raw_pipeline, dict) or not isinstance(raw_pipeline.get("steps"), list) or not raw_pipeline.get("steps"):
         if fallback_strategy is not None:
             return strategy_to_pipeline(fallback_strategy, name=name)
@@ -173,7 +253,7 @@ def normalize_pipeline(raw_pipeline, fallback_strategy=None, name="candidate"):
         normalized["generated_operators"] = [
             spec.as_dict() for spec in normalize_generated_operators(raw_pipeline.get("generated_operators"))
         ]
-    return normalized
+    return _preserve_replay_metadata(raw_pipeline, normalized)
 
 
 def is_builtin_pipeline(pipeline):
@@ -181,10 +261,12 @@ def is_builtin_pipeline(pipeline):
 
 
 def validate_builtin_pipeline(pipeline):
+    pipeline = _canonical_pipeline_names(pipeline)
     if not is_builtin_pipeline(pipeline):
         raise ValueError("not a builtin pipeline")
     if pipeline.get("name") not in BUILTIN_PIPELINE_NAMES:
         raise ValueError(f"unsupported builtin pipeline: {pipeline.get('name')}")
+    _validate_operator_versions(pipeline, {pipeline["name"]: "legacy-1.0.0"})
     params = pipeline.get("params", {})
     if not isinstance(params, dict):
         raise ValueError("builtin pipeline params must be an object")
@@ -237,11 +319,36 @@ def _normalize_pipeline_step(raw_step):
     return step
 
 
+def _normalize_pipeline_node(raw_node):
+    node = dict(raw_node)
+    if "operator" not in node and node.get("op"):
+        node["operator"] = node.pop("op")
+    node["params"] = dict(node.get("params") or {})
+    node["inputs"] = dict(node.get("inputs") or {})
+    if node.get("operator") == "morphology":
+        node = _normalize_pipeline_step({
+            "id": node.get("id"),
+            "op": node["operator"],
+            "params": node["params"],
+        }) | {"inputs": node["inputs"], "operator": node["operator"]}
+        node.pop("op", None)
+    return node
+
+
+def is_v3_pipeline(pipeline):
+    return isinstance(pipeline, dict) and (
+        pipeline.get("schema_version") == 3 or "nodes" in pipeline
+    )
+
+
 def validate_pipeline(pipeline, registry=None):
+    pipeline = _canonical_pipeline_names(pipeline)
     if is_builtin_pipeline(pipeline):
         return validate_builtin_pipeline(pipeline)
     generated_specs = pipeline.get("generated_operators") or [] if isinstance(pipeline, dict) else []
     registry = registry or build_default_registry(generated_specs)
+    if is_v3_pipeline(pipeline):
+        return _validate_v3_pipeline(pipeline, registry, generated_specs)
     if not isinstance(pipeline, dict):
         raise ValueError("pipeline must be an object")
     steps = pipeline.get("steps")
@@ -275,6 +382,8 @@ def validate_pipeline(pipeline, registry=None):
             raise ValueError(f"pipeline step {step_id} params must be an object")
 
         definition = registry.definition(op)
+        if op not in generated_names and not definition.legacy_allowed:
+            raise ValueError(f"pipeline operator requires v3 named inputs: {op}")
         actual_type = artifact_types[input_id]
         if not issubclass(actual_type, definition.input_type):
             raise ValueError(
@@ -293,10 +402,141 @@ def validate_pipeline(pipeline, registry=None):
 
     if not has_mask:
         raise ValueError("pipeline must produce a mask")
+    _validate_operator_versions(pipeline, {
+        step["op"]: registry.definition(step["op"]).version for step in steps
+    })
     return pipeline
 
 
-def execute_pipeline(image, pipeline, allow_generated=False):
+def _validate_v3_pipeline(pipeline, registry, generated_specs):
+    if not isinstance(pipeline, dict):
+        raise ValueError("pipeline must be an object")
+    nodes = pipeline.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError("pipeline.nodes must be a non-empty list")
+    generated_names = {
+        str(item.get("name")) for item in generated_specs
+        if isinstance(item, dict) and item.get("name")
+    }
+    node_by_id = {}
+    for index, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            raise ValueError(f"pipeline node {index} must be an object")
+        node_id = node.get("id")
+        operator = node.get("operator")
+        inputs = node.get("inputs")
+        params = node.get("params", {})
+        if not isinstance(node_id, str) or not node_id or node_id in {"image", "$image"}:
+            raise ValueError(f"pipeline node {index} requires a unique non-reserved id")
+        if node_id in node_by_id or node_id in pipeline.get("input_types", {}):
+            raise ValueError(f"duplicate pipeline node id: {node_id}")
+        if operator not in registry.names():
+            raise ValueError(f"pipeline operator is not allowed: {operator}")
+        definition = registry.definition(operator)
+        if operator not in generated_names and not definition.model_visible:
+            raise ValueError(f"pipeline operator is not model-visible: {operator}")
+        if not isinstance(inputs, dict):
+            raise ValueError(f"pipeline node {node_id} inputs must be an object")
+        if set(inputs) != set(definition.input_ports):
+            raise ValueError(
+                f"pipeline node {node_id} expects input ports {sorted(definition.input_ports)}, "
+                f"got {sorted(inputs)}"
+            )
+        if not all(isinstance(reference, str) and reference for reference in inputs.values()):
+            raise ValueError(f"pipeline node {node_id} input references must be non-empty strings")
+        if not isinstance(params, dict):
+            raise ValueError(f"pipeline node {node_id} params must be an object")
+        if operator not in generated_names:
+            allowed_params = set(inspect.signature(definition.function).parameters) - set(definition.input_ports)
+            unknown_params = set(params) - allowed_params
+            if unknown_params:
+                raise ValueError(f"pipeline node {node_id} has unknown params: {sorted(unknown_params)}")
+        node_by_id[node_id] = node
+
+    artifact_types = {"$image": ImageArtifact, "image": ImageArtifact}
+    from core.operators.generated import ARTIFACT_TYPES
+    declared_inputs = pipeline.get("input_types", {})
+    if not isinstance(declared_inputs, dict):
+        raise ValueError("input_types must be a mapping")
+    for name, kind in declared_inputs.items():
+        if not isinstance(name, str) or not name.startswith("$") or name == "$image" or kind not in ARTIFACT_TYPES:
+            raise ValueError("invalid external input declaration")
+        artifact_types[name] = ARTIFACT_TYPES[kind]
+    visiting = set()
+    visited = set()
+
+    def resolve(node_id):
+        if node_id in artifact_types:
+            return artifact_types[node_id]
+        if node_id not in node_by_id:
+            raise ValueError(f"pipeline references unknown node: {node_id}")
+        if node_id in visiting:
+            raise ValueError(f"pipeline contains a cycle at node: {node_id}")
+        if node_id in visited:
+            return artifact_types[node_id]
+        visiting.add(node_id)
+        node = node_by_id[node_id]
+        definition = registry.definition(node["operator"])
+        for port, expected_type in definition.input_ports.items():
+            actual_type = resolve(node["inputs"][port])
+            if not issubclass(actual_type, expected_type):
+                raise ValueError(
+                    f"pipeline node {node_id} input {port} expects {expected_type.__name__}, "
+                    f"but {node['inputs'][port]} is {actual_type.__name__}"
+                )
+        artifact_types[node_id] = definition.output_type
+        visiting.remove(node_id)
+        visited.add(node_id)
+        return definition.output_type
+
+    for node_id in node_by_id:
+        resolve(node_id)
+    outputs = pipeline.get("outputs", {})
+    if not isinstance(outputs, dict):
+        raise ValueError("pipeline outputs must be an object")
+    if "outputs" in pipeline and not outputs:
+        raise ValueError("explicit outputs must not be empty")
+    mask_output = outputs.get("mask") if isinstance(outputs, dict) else None
+    if mask_output is not None:
+        if mask_output not in artifact_types or not issubclass(artifact_types[mask_output], MaskArtifact):
+            raise ValueError("pipeline outputs.mask must reference a MaskArtifact node")
+    elif not outputs and not any(issubclass(artifact_type, MaskArtifact) for artifact_type in artifact_types.values()):
+        raise ValueError("pipeline must produce a mask")
+    for name, reference in outputs.items():
+        if not isinstance(reference, str) or reference not in node_by_id:
+            raise ValueError(f"pipeline output {name} must reference a node")
+    contour_output = outputs.get("contours") if isinstance(outputs, dict) else None
+    if contour_output is not None:
+        if contour_output not in artifact_types or not issubclass(artifact_types[contour_output], ContourArtifact):
+            raise ValueError("pipeline outputs.contours must reference a ContourArtifact node")
+    _validate_operator_versions(pipeline, {
+        node["operator"]: registry.definition(node["operator"]).version for node in nodes
+    })
+    return pipeline
+
+
+def _v3_execution_order(pipeline):
+    nodes = {node["id"]: node for node in pipeline["nodes"]}
+    ordered = []
+    seen = set()
+
+    def visit(node_id):
+        if node_id in seen:
+            return
+        node = nodes[node_id]
+        for reference in node.get("inputs", {}).values():
+            if reference in nodes:
+                visit(reference)
+        seen.add(node_id)
+        ordered.append(node)
+
+    for node in pipeline["nodes"]:
+        visit(node["id"])
+    return ordered
+
+
+def execute_pipeline(image, pipeline, allow_generated=False, inputs=None):
+    pipeline = _canonical_pipeline_names(pipeline)
     if is_builtin_pipeline(pipeline):
         validate_builtin_pipeline(pipeline)
         from core.pipelines.periodic_particle import run_periodic_particle_pipeline
@@ -312,8 +552,13 @@ def execute_pipeline(image, pipeline, allow_generated=False):
     generated_specs = pipeline.get("generated_operators") or []
     if generated_specs and not allow_generated:
         raise ValueError("generated operators may only execute inside the sandbox")
+    if generated_specs:
+        from core.sandbox import require_docker_worker
+        require_docker_worker()
     registry = build_default_registry(generated_specs)
     validate_pipeline(pipeline, registry=registry)
+    if is_v3_pipeline(pipeline):
+        return _execute_v3_pipeline(image, pipeline, registry, inputs=inputs)
     source = ImageArtifact(np.asarray(image, dtype=np.float32))
     artifacts = {"image": source}
     trace = []
@@ -326,7 +571,7 @@ def execute_pipeline(image, pipeline, allow_generated=False):
         result = registry.run(step["op"], artifacts[input_id], **step.get("params", {}))
         duration = time.monotonic() - started
         artifact = result.artifact
-        if isinstance(artifact, MaskArtifact) and artifact.data.shape != source.data.shape:
+        if isinstance(artifact, MaskArtifact) and artifact.data.shape != source.data.shape[:2]:
             raise ValueError(f"pipeline step {step['id']} returned a mask with the wrong shape")
         artifacts[step["id"]] = artifact
         if isinstance(artifact, MaskArtifact):
@@ -366,4 +611,68 @@ def execute_pipeline(image, pipeline, allow_generated=False):
         contours=final_contours,
         trace=tuple(trace),
         artifacts=artifacts,
+    )
+
+
+def _execute_v3_pipeline(image, pipeline, registry, inputs=None):
+    source = ImageArtifact(np.asarray(image, dtype=np.float32))
+    artifacts = {"$image": source, "image": source}
+    from core.operators.generated import ARTIFACT_TYPES
+    supplied = inputs or {}
+    if set(supplied) != set(pipeline.get("input_types", {})):
+        raise ValueError("external inputs must match input_types")
+    for name, kind in pipeline.get("input_types", {}).items():
+        artifacts[name] = ARTIFACT_TYPES[kind](supplied[name])
+    trace = []
+    for node in _v3_execution_order(pipeline):
+        input_artifacts = {
+            port: artifacts[reference]
+            for port, reference in node["inputs"].items()
+        }
+        started = time.monotonic()
+        result = registry.run_inputs(node["operator"], input_artifacts, **node.get("params", {}))
+        duration = time.monotonic() - started
+        artifact = result.artifact
+        if isinstance(artifact, MaskArtifact) and artifact.data.shape != source.data.shape[:2]:
+            raise ValueError(f"pipeline node {node['id']} returned a mask with the wrong shape")
+        artifacts[node["id"]] = artifact
+        warnings = list(result.warnings)
+        mask_facts = None
+        if isinstance(artifact, MaskArtifact):
+            mask_facts = mask_statistics(artifact.data)
+            if mask_facts["coverage"] == 0:
+                warnings.append("empty_mask")
+            if mask_facts["coverage"] > 0.35:
+                warnings.append("coverage_exceeded")
+            if result.metadata.get("kept_components") == 0:
+                warnings.append("kept_components=0")
+        trace.append({
+            "step_id": node["id"],
+            "operator": node["operator"],
+            "inputs": node["inputs"],
+            "params": node.get("params", {}),
+            "duration_seconds": round(duration, 6),
+            "metadata": result.metadata,
+            "warnings": list(dict.fromkeys(warnings)),
+            **({"mask_statistics": mask_facts} if mask_facts is not None else {}),
+        })
+    outputs = pipeline.get("outputs") or {}
+    mask_id = next((ref for ref in outputs.values() if isinstance(artifacts[ref], MaskArtifact)), None)
+    if "outputs" not in pipeline:
+        mask_id = next(
+            (node["id"] for node in reversed(_v3_execution_order(pipeline))
+             if isinstance(artifacts[node["id"]], MaskArtifact)), None,
+        )
+    mask = artifacts[mask_id] if mask_id else None
+    contour_id = outputs.get("contours")
+    contours = artifacts.get(contour_id) if contour_id else None
+    if not isinstance(contours, ContourArtifact) and mask is not None:
+        contours = registry.run("extract_contours", mask).artifact
+    return PipelineExecutionResult(
+        pipeline=pipeline,
+        mask=mask,
+        contours=contours,
+        trace=tuple(trace),
+        artifacts=artifacts,
+        outputs={name: artifacts[reference] for name, reference in outputs.items()},
     )

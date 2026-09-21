@@ -7,11 +7,13 @@ from PIL import Image
 
 from agent_types import normalize_strategy
 from core.agent_loop import (
+    _fit_candidate_budget,
     _apply_feedback_quality,
     _ground_truth_calibration_candidates,
     _pipeline_diff,
     apply_user_constraints,
     run_planned_agent,
+    plan_candidate_definitions,
 )
 from core.measurement.evaluation import evaluate_prediction
 from core.pipelines.dsl import execute_pipeline, strategy_to_pipeline
@@ -40,6 +42,83 @@ def test_apply_user_constraints_forces_include_and_exclude_masks(tmp_path):
     assert constrained[0, 0]
     assert not constrained[2, 2]
     assert report == {"included_pixels": 1, "excluded_pixels": 1}
+
+
+def test_candidate_budget_reserves_a_slot_for_accepted_algorithm():
+    pipeline = lambda name, sensitivity: {
+        "name": name,
+        "steps": [{"id": "final_mask", "op": "global_threshold", "input": "image", "params": {"polarity": "bright", "sensitivity": sensitivity}}],
+    }
+    understanding = {
+        "recommended_strategy": {},
+        "candidate_pipelines": [
+            {"name": f"generated_{index}", "pipeline": pipeline(f"generated_{index}", index + 1)}
+            for index in range(3)
+        ],
+    }
+    retrieved = [{"algorithm_id": "accepted_1", "name": "accepted", "pipeline": pipeline("accepted", 4)}]
+
+    candidates = plan_candidate_definitions(understanding, retrieved_algorithms=retrieved, max_candidates=3)
+
+    assert len(candidates) == 3
+    assert candidates[0]["source"]["type"] == "accepted_algorithm"
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_candidate_budget_keeps_new_revision_and_respects_limit(limit):
+    candidates = [
+        {"name": f"revision_{index}", "source": {"type": "qwen"}}
+        for index in range(3)
+    ] + [{"name": "baseline", "source": {"type": "previous_iteration"}}]
+    selected = _fit_candidate_budget(candidates, limit)
+    assert len(selected) == limit
+    assert selected[0]["name"] == "revision_0"
+    if limit > 1:
+        assert selected[-1]["name"] == f"revision_{limit - 1}"
+
+
+@pytest.mark.parametrize("calibration_limit", [0, 1])
+def test_executor_enforces_external_plan_and_calibration_budgets(tmp_path, calibration_limit):
+    image = np.zeros((32, 32), dtype=np.uint8)
+    image[10:18, 10:18] = 255
+    source = tmp_path / "image.png"
+    Image.fromarray(image).save(source)
+    candidates = [{
+        "name": f"candidate_{index}",
+        "pipeline": {"steps": [
+            {"id": "residual", "op": "local_background_residual", "input": "image", "params": {"sigma": index + 2}},
+            {"id": "mask", "op": "global_threshold", "input": "residual", "params": {}},
+            {"id": "filtered", "op": "filter_components", "input": "mask", "params": {"min_area": 1}},
+        ]},
+    } for index in range(3)]
+    state = run_planned_agent(
+        source, "bright defect", {"recommended_strategy": {}},
+        output_root=tmp_path / "outputs", planned_candidates=candidates,
+        max_candidates=1, max_calibration_candidates=calibration_limit,
+        ground_truth_mask_path=source,
+    )
+    assert len(state["candidate_attempts"]) == 1 + calibration_limit
+    budget = json.loads((Path(state["run_dir"]) / "iteration_0/candidate_budget.json").read_text())
+    assert budget["planned_count"] == 1 + calibration_limit
+
+
+def test_incompatible_replay_does_not_abort_other_candidates(tmp_path):
+    from core.pipelines.dsl import pin_pipeline_operator_versions
+
+    image = np.zeros((32, 32), dtype=np.uint8)
+    image[10:18, 10:18] = 255
+    source = tmp_path / "image.png"
+    Image.fromarray(image).save(source)
+    valid = strategy_to_pipeline({"segmentation": {"min_area_px": 1}})
+    incompatible = pin_pipeline_operator_versions(valid)
+    incompatible["operator_versions"]["normalize"] = "999.0.0"
+    state = run_planned_agent(
+        source, "bright defect", {"recommended_strategy": {}},
+        output_root=tmp_path / "outputs", max_candidates=2,
+        planned_candidates=[{"name": "old", "pipeline": incompatible}, {"name": "new", "pipeline": valid}],
+    )
+    assert state["selected_candidate"] == "new"
+    assert "version mismatch" in state["candidate_attempts"][0]["quality"]["error"]
 
 
 def test_apply_user_constraints_does_not_union_an_unreviewed_previous_prediction(tmp_path):
@@ -84,7 +163,7 @@ def test_agent_loop_executes_candidates_selects_best_and_saves_replay_artifacts(
         "rendering": {"contour_color": "#39FF14", "contour_thickness": 2},
     }
 
-    state = run_planned_agent(source, "提取绿色长条轮廓", understanding, tmp_path / "outputs")
+    state = run_planned_agent(source, "提取绿色长条轮廓", understanding, tmp_path / "outputs", max_candidates=2)
 
     assert state["selected_candidate"] == "elongated"
     assert state["candidate_attempts"][0]["status"] == "failed"
@@ -102,6 +181,8 @@ def test_agent_loop_executes_candidates_selects_best_and_saves_replay_artifacts(
         "mask.png",
         "result_annotated.png",
         "graph_state.json",
+        "runtime_environment.json",
+        "candidate_budget.json",
     ):
         assert (iteration / filename).exists()
     saved = json.loads((iteration / "graph_state.json").read_text(encoding="utf-8"))
@@ -159,12 +240,10 @@ def test_agent_loop_tracks_parent_iteration_and_previous_pipeline_baseline(tmp_p
     assert second["parent_iteration"] == 0
     assert second["parent_result_image_path"] == first["annotated_image_path"]
     assert second["candidate_attempts"][0]["name"] == "candidate"
-    # The replay baseline is deduplicated; the default multi-candidate setting
-    # may still execute a distinct deterministic fallback.
-    assert len(second["candidate_attempts"]) >= 1
+    assert len(second["candidate_attempts"]) == 1
 
 
-def test_agent_loop_skips_empty_candidate_and_selects_first_nonempty_result(tmp_path):
+def test_agent_loop_keeps_empty_candidate_for_task_review(tmp_path):
     source = tmp_path / "sample.png"
     image = np.zeros((32, 32), dtype=np.uint8)
     image[10:18, 10:18] = 255
@@ -190,14 +269,14 @@ def test_agent_loop_skips_empty_candidate_and_selects_first_nonempty_result(tmp_
         "rendering": {},
     }
 
-    state = run_planned_agent(source, "标注亮色区域", understanding, tmp_path / "outputs")
+    state = run_planned_agent(source, "标注亮色区域", understanding, tmp_path / "outputs", max_candidates=2)
 
-    assert state["candidate_attempts"][0]["status"] == "no_annotation"
-    assert state["selected_candidate"] == "nonempty"
-    assert state["measurements"]["summary"]["count"] == 1
+    assert state["candidate_attempts"][0]["status"] == "selected_for_review"
+    assert state["candidate_attempts"][0]["measurements"]["summary"]["count"] == 0
+    assert any(item["measurements"]["summary"]["count"] == 1 for item in state["candidate_attempts"])
 
 
-def test_agent_loop_can_return_empty_result_for_graph_retry(tmp_path):
+def test_agent_loop_returns_empty_result_for_review(tmp_path):
     source = tmp_path / "sample.png"
     image = np.zeros((32, 32), dtype=np.uint8)
     image[10:18, 10:18] = 255
@@ -229,14 +308,14 @@ def test_agent_loop_can_return_empty_result_for_graph_retry(tmp_path):
         return_failure_state=True,
     )
 
-    assert state["status"] == "retry_needed"
-    assert state["agent_status"] == "retrying"
-    assert state["candidate_attempts"][0]["status"] == "no_annotation"
+    assert state["status"] == "ok"
+    assert state["agent_status"] == "waiting_for_acceptance"
+    assert state["candidate_attempts"][0]["status"] == "selected_for_review"
     assert state["candidate_attempts"][0]["operator_trace"][0]["operator"] == "global_threshold"
-    assert state["quality_report"]["issues"] == ["empty_annotation"]
+    assert "empty_mask" in state["quality_report"]["health"]["diagnostics"]
 
 
-def test_agent_loop_rejects_overlarge_mask_before_visual_review(tmp_path):
+def test_agent_loop_retains_large_mask_for_visual_review(tmp_path):
     source = tmp_path / "sample.png"
     image = np.zeros((32, 32), dtype=np.uint8)
     image[0:8, 0:8] = 255
@@ -260,9 +339,9 @@ def test_agent_loop_rejects_overlarge_mask_before_visual_review(tmp_path):
     )
 
     attempt = state["candidate_attempts"][0]
-    assert attempt["status"] == "health_failed"
+    assert attempt["status"] == "selected_for_review"
     assert "coverage_too_large" in attempt["quality"]["health"]["issues"]
-    assert state["quality_report"]["issues"] == ["mask_health_failed"]
+    assert state["quality_report"]["health"]["usable_for_review"]
 
 
 def test_agent_loop_replays_retrieved_algorithm_before_qwen_candidates(tmp_path):
@@ -302,12 +381,13 @@ def test_agent_loop_replays_retrieved_algorithm_before_qwen_candidates(tmp_path)
         understanding,
         tmp_path / "outputs",
         retrieved_algorithms=retrieved,
+        max_candidates=2,
     )
 
-    assert state["candidate_attempts"][0]["name"] == "qwen_candidate"
-    assert state["candidate_attempts"][0]["source"]["type"] == "qwen"
-    assert state["candidate_attempts"][1]["name"] == "accepted::accepted_particle"
-    assert state["candidate_attempts"][1]["source"]["type"] == "accepted_algorithm"
+    assert state["candidate_attempts"][0]["name"] == "accepted::accepted_particle"
+    assert state["candidate_attempts"][0]["source"]["type"] == "accepted_algorithm"
+    assert state["candidate_attempts"][1]["name"] == "qwen_candidate"
+    assert state["candidate_attempts"][1]["source"]["type"] == "qwen"
     assert state["retrieved_algorithms"][0]["algorithm_id"] == "algorithm_1"
 
 
@@ -396,6 +476,7 @@ def test_ground_truth_calibration_fixes_elliptical_nanohole_sample(tmp_path):
         output_root=tmp_path / "outputs",
         planned_candidates=[candidate],
         ground_truth_mask_path=ground_truth_path,
+        max_calibration_candidates=6,
     )
 
     assert state["measurements"]["summary"]["count"] == 9

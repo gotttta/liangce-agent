@@ -4,6 +4,19 @@ import numpy as np
 
 
 def measure_components(mask, min_area=20, unit="pixel"):
+    """Measure connected components in image-pixel coordinates.
+
+    Physical units require a pixel calibration.  The runtime does not yet
+    accept calibration metadata, so rejecting a requested physical unit is
+    preferable to relabelling a pixel count as micrometres or similar.
+    """
+    normalized_unit = str(unit or "pixel").strip().lower()
+    if normalized_unit in {"px", "pixel", "pixels"}:
+        normalized_unit = "pixel"
+    else:
+        raise ValueError(
+            "physical measurement units require pixel calibration; use unit='pixel'"
+        )
     visited = np.zeros(mask.shape, dtype=bool)
     results = []
     component_id = 1
@@ -33,7 +46,9 @@ def measure_components(mask, min_area=20, unit="pixel"):
                 "width": bbox_width,
                 "height": bbox_height,
                 "aspect_ratio": round(aspect_ratio, 4),
-                "unit": unit,
+                "unit": normalized_unit,
+                # Legacy artifacts expose this field; it is not a calibrated
+                # confidence estimate.
                 "confidence": 0.5,
             })
             component_id += 1
@@ -46,7 +61,7 @@ def measure_components(mask, min_area=20, unit="pixel"):
         "summary": {
             "count": len(results),
             "total_area": total_area,
-            "unit": unit,
+            "unit": normalized_unit,
             "area_ratio": area_ratio,
         },
     }

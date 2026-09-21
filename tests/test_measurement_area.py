@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from core.measurement.area import measure_components
 
@@ -20,6 +21,7 @@ def test_measure_components_reports_count_area_bbox_and_area_ratio():
     assert result["results"][0]["area"] == 6
     assert result["results"][1]["bbox"] == [7, 6, 2, 2]
     assert result["results"][1]["area"] == 4
+    assert result["results"][0]["confidence"] == 0.5
 
 
 def test_measure_components_filters_small_noise():
@@ -32,3 +34,8 @@ def test_measure_components_filters_small_noise():
     assert result["summary"]["count"] == 1
     assert result["summary"]["total_area"] == 9
     assert result["summary"]["area_ratio"] == round(9 / 64, 6)
+
+
+def test_measure_components_rejects_uncalibrated_physical_units():
+    with pytest.raises(ValueError, match="require pixel calibration"):
+        measure_components(np.ones((2, 2), dtype=bool), min_area=1, unit="um")

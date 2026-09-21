@@ -1,10 +1,11 @@
+from core.runtime_logging import logger, logged_operation, bind_context, redact
 from pathlib import Path
 import json
 import os
 import queue
 import threading
 import time
-
+from datetime import datetime
 import gradio as gr
 import numpy as np
 from PIL import Image
@@ -13,7 +14,14 @@ from core.agent_graph import resume_agent_graph, run_agent_graph
 from core.task_store import TaskStore, save_rejection_record
 from ui.gradio_adapters import measurement_rows, state_to_chat_messages
 from ui.styles import load_styles
-from ui.utils.formatters import format_progress_card, format_task_card
+from ui.utils.formatters import format_context_usage, format_progress_card, format_task_card
+from ui.utils.progress import (
+    is_progress_message,
+    candidate_progress_events as _candidate_progress_events,
+    merge_progress_event as _merge_progress_event,
+    progress_event as _progress_event,
+    short_candidate_name,
+)
 
 try:
     from providers.vision import build_runtime_provider
@@ -23,6 +31,20 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_ROOT = ROOT / "workspace" / "tasks"
+
+NEW_TASK_PLACEHOLDER = "描述需要检测的目标、轮廓或量测要求…"
+FOLLOW_UP_PLACEHOLDER = "描述需要修改的地方，或继续询问 Agent…"
+FEEDBACK_PLACEHOLDER = "描述需要修改的地方，例如：右上角有漏检…"
+
+# 任务状态在下拉等界面里的中文名（存储值保持英文）。
+_TASK_STATUS_LABELS = {
+    "draft": "草稿",
+    "in_progress": "进行中",
+    "waiting_for_acceptance": "待确认",
+    "waiting_for_feedback": "待反馈",
+    "accepted": "已验收",
+    "exited": "已结束",
+}
 
 # Backwards-compatible export for integrations that used the former inline CSS constant.
 ANNOTATION_CSS = load_styles()
@@ -41,8 +63,7 @@ def configure_gradio_environment():
 SCROLL_CHAT_JS = """
 () => {
     window.setTimeout(() => {
-        const messages = document.querySelector('#annotation-chatbot .bubble-wrap');
-        const target = messages || document.querySelector('#annotation-chat');
+        const target = document.querySelector('#annotation-chat');
         if (target) {
             target.scrollTo({ top: target.scrollHeight, behavior: 'smooth' });
         }
@@ -53,7 +74,7 @@ SCROLL_CHAT_JS = """
 SHOW_LATEST_RESULT_JS = """
 () => {
     const focusLatestResult = () => {
-        const messages = document.querySelector('#annotation-chatbot .bubble-wrap');
+        const messages = document.querySelector('#annotation-chat');
         if (!messages) return false;
         const taskCards = messages.querySelectorAll('.task-card');
         const progressCards = messages.querySelectorAll('.progress-card');
@@ -70,7 +91,7 @@ SHOW_LATEST_RESULT_JS = """
         window.setTimeout(() => {
             const focused = focusLatestResult();
             if (!focused && index === delays.length - 1) {
-                const messages = document.querySelector('#annotation-chatbot .bubble-wrap');
+                const messages = document.querySelector('#annotation-chat');
                 messages?.scrollTo({ top: messages.scrollHeight, behavior: 'auto' });
             }
         }, delay);
@@ -224,6 +245,8 @@ def save_canvas_feedback(editor_value, task, previous_state, green_editor_value=
 
     # Feedback is cumulative across correction rounds. A later green mark is
     # an additional missing target, not a replacement for earlier marks.
+    from core.input_contract import COORDINATE_VERSION
+    identity = {key: (previous_state or {}).get(key) for key in ("input_sha256", "coordinate_version")}
     previous_feedback = (previous_state or {}).get("human_feedback") or {}
     legacy_feedback = (previous_state or {}).get("feedback") or {}
     previous_paths = {
@@ -252,6 +275,8 @@ def save_canvas_feedback(editor_value, task, previous_state, green_editor_value=
             if event.get("type") != "canvas_feedback_saved":
                 continue
             payload = event.get("payload") or {}
+            if not identity.get("input_sha256") or any(payload.get(k) != v for k, v in identity.items()):
+                continue
             previous_paths["false_positive"].append(payload.get("false_positive_mask_path"))
             previous_paths["false_negative"].append(payload.get("false_negative_mask_path"))
     for kind, paths in previous_paths.items():
@@ -261,7 +286,7 @@ def save_canvas_feedback(editor_value, task, previous_state, green_editor_value=
             historical = np.asarray(Image.open(path).convert("L")) > 0
             current = false_positive if kind == "false_positive" else false_negative
             if historical.shape != current.shape:
-                raise ValueError("历史画布反馈与当前图片尺寸不一致，请清空画布后重新标记。")
+                continue
             current |= historical
 
     combined = false_positive | false_negative
@@ -313,6 +338,7 @@ def save_canvas_feedback(editor_value, task, previous_state, green_editor_value=
         "feedback_pixel_count": int(np.count_nonzero(combined)),
     })
     store.append_event(task["id"], "canvas_feedback_saved", {
+        **identity,
         "feedback_image_path": str(composite_path),
         "feedback_layer_path": str(marks_path),
         "false_positive_mask_path": str(false_positive_path),
@@ -328,23 +354,114 @@ def create_chat_task():
     return TaskStore(TASK_ROOT).create_task()
 
 
-def _task_choices(include_task_id=None):
+def _format_task_time(value):
+    """ISO 时间转侧栏短格式：今天只给时刻，今年给月日时刻，其余给完整日期。"""
+    text = str(value or "")
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return text[:16].replace("T", " ")
+    if moment.tzinfo is not None:
+        moment = moment.astimezone()
+    now = datetime.now(moment.tzinfo)
+    if moment.date() == now.date():
+        return f"今天 {moment:%H:%M}"
+    if moment.year == now.year:
+        return f"{moment:%m-%d} {moment:%H:%M}"
+    return f"{moment:%Y-%m-%d}"
+
+
+_TASK_LIST_LIMIT = 30
+# Dataset 列定义：首列存任务 ID（渲染时隐藏），点击行时以行值形式回传。
+_TASK_DATASET_COMPONENTS = ["textbox", "textbox", "textbox"]
+_TASK_DATASET_PROPS = [{}, {}, {}]
+
+
+def _task_rows(limit=_TASK_LIST_LIMIT, selected_id=None):
+    """侧栏任务列表行（updated_at 倒序；空草稿不占位，当前任务除外）。
+
+    先过滤再截断：否则空草稿会把有效任务挤出最近 N 条的窗口。
+    """
     store = TaskStore(TASK_ROOT)
-    choices = []
-    for task in store.list_tasks(limit=40):
-        meaningful = bool(
-            task.get("samples")
-            or task.get("current_node")
-            or task.get("status") not in {"draft"}
-        )
-        if not meaningful and task.get("id") != include_task_id:
+    rows = []
+    for task in store.list_tasks(limit=200):
+        status_key = task.get("status", "draft")
+        meaningful = bool(task.get("samples") or task.get("current_node") or status_key != "draft")
+        if not meaningful and task.get("id") != selected_id:
             continue
-        updated = str(task.get("updated_at", ""))[:16].replace("T", " ")
-        status = task.get("status", "draft")
-        title = task.get("title") or "未命名任务"
-        display_title = title if len(title) <= 28 else f"{title[:28]}…"
-        choices.append((f"{display_title} · {status} · {updated}", task["id"]))
-    return choices
+        rows.append({
+            "id": task["id"],
+            "title": task.get("title") or "未命名任务",
+            "status_key": status_key,
+            "status": _TASK_STATUS_LABELS.get(status_key, str(status_key)),
+            "time": _format_task_time(task.get("updated_at")),
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _task_samples(selected_id=None):
+    """历史任务列表样本行：[任务ID, 标题, 状态 · 时间]，首列供恢复事件取值。"""
+    samples = []
+    for row in _task_rows(selected_id=selected_id):
+        meta = f"{row['status']} · {row['time']}"
+        if row["id"] == selected_id:
+            meta += " · 当前"
+        samples.append([row["id"], str(row["title"]), meta])
+    return samples
+
+
+def task_history_update(selected_id=None):
+    """事件链尾部刷新侧栏列表，保持状态与当前任务标记同步。
+
+    必须用 gr.update 返回纯字典：在请求处理中构造 gr.Dataset 会因字符串
+    简写组件缺少 label/proxy_url 属性而崩溃（Gradio 5.50）。
+    """
+    return gr.update(samples=_task_samples(selected_id))
+
+
+def rename_chat_task(new_title, task):
+    """重命名当前打开的任务，并刷新侧栏历史列表。"""
+    task_id = task.get("id") if isinstance(task, dict) else None
+    if not task_id:
+        raise gr.Error("当前没有打开的任务。")
+    title = str(new_title or "").strip()
+    if not title:
+        raise gr.Error("请先输入新的任务名称。")
+    stored = TaskStore(TASK_ROOT).set_title(task_id, title)
+    task = dict(task)
+    task["title"] = stored["title"]
+    return task, gr.update(value=""), task_history_update(task_id)
+
+
+def delete_chat_task(armed, task, *current_outputs):
+    """两段式删除：首次点击进入确认态，再次点击删除并回到新任务页面。"""
+    task_id = task.get("id") if isinstance(task, dict) else None
+    if not task_id:
+        raise gr.Error("当前没有可删除的任务。")
+    if not armed:
+        return (gr.update(value="再点一次确认删除", variant="stop"), True, *current_outputs)
+    TaskStore(TASK_ROOT).delete_task(task_id)
+    return (
+        gr.update(value="删除当前任务", variant="secondary"),
+        False,
+        *reset_chat_task(),
+    )
+
+
+def refresh_task_history(task):
+    """按当前任务的 task_state 刷新列表。"""
+    return task_history_update(task.get("id") if isinstance(task, dict) else None)
+
+
+def resume_from_history(row):
+    """从列表行取回任务 ID 并恢复该任务。"""
+    if isinstance(row, (list, tuple)):
+        task_id = row[0] if row else None
+    else:
+        task_id = row
+    return resume_chat_task(str(task_id or ""))
 
 
 def resume_chat_task(task_id):
@@ -366,6 +483,15 @@ def resume_chat_task(task_id):
         and state.get("annotated_image_path")
         and task.get("status") not in {"accepted", "exited"}
     )
+    show_artifacts = bool(state and state.get("annotated_image_path"))
+    if state:
+        # Historical messages contain rendered HTML; rebuild only the latest
+        # execution snapshot from its authoritative state, without rewriting disk.
+        display_state = {**state, "agent_status": "accepted"} if task.get("status") == "accepted" else state
+        for index in range(len(messages) - 1, -1, -1):
+            if is_progress_message(messages[index]):
+                messages[index] = {**messages[index], "content": _format_agent_process(_state_process_events(display_state))}
+                break
     if not messages:
         messages = [{
             "role": "assistant",
@@ -380,15 +506,16 @@ def resume_chat_task(task_id):
         state,
         task,
         attachment,
-        gr.update(value="", placeholder="描述需要修改的地方，或继续询问 Agent…"),
+        gr.update(value="", placeholder=FOLLOW_UP_PLACEHOLDER),
         attachment_label,
         gr.update(visible=show_actions),
         gr.update(visible=True),
         gr.update(value=None),
         gr.update(value=None),
         gr.update(value=[item.get("image_path") or item.get("path") for item in task.get("reference_examples", [])]),
-        gr.update(choices=_task_choices(task_id), value=task_id),
+        task_history_update(task_id),
         gr.update(value=(task.get("ground_truth") or {}).get("annotation_path")),
+        gr.update(visible=show_artifacts),
     )
 
 
@@ -409,39 +536,14 @@ def load_latest_chat_task():
 
 def _task_memory_context(store, task_id):
     try:
-        return store.load_memory(task_id)
+        return store.memory_service.snapshot(task_id)
     except (OSError, ValueError, TypeError, FileNotFoundError):
         return {}
 
 
 def _save_task_memory(store, task_id, message, understanding, state, previous_state):
-    existing = _task_memory_context(store, task_id)
-    corrections = list(existing.get("corrections") or [])
-    if previous_state and (
-        previous_state.get("feedback_pixel_count")
-        or previous_state.get("agent_status") == "waiting_for_feedback"
-    ):
-        corrections.append({
-            "iteration": state.get("iteration"),
-            "request": message,
-            "false_positive_pixels": previous_state.get("false_positive_pixel_count", 0),
-            "false_negative_pixels": previous_state.get("false_negative_pixel_count", 0),
-        })
-    memory = {
-        "task_goal": existing.get("task_goal") or understanding.get("task_summary") or message,
-        "latest_user_request": message,
-        "latest_iteration": state.get("iteration"),
-        "active_constraints": understanding.get("target_constraints") or {},
-        "selected_pipeline": state.get("pipeline") or {},
-        "pipeline_diff": state.get("pipeline_diff") or {},
-        "strategy": state.get("strategy") or {},
-        "quality_report": state.get("quality_report") or {},
-        "measurement_summary": state.get("measurements", {}).get("summary", {}),
-        "latest_result_image_path": state.get("annotated_image_path"),
-        "latest_mask_path": state.get("predicted_mask_path"),
-        "corrections": corrections[-20:],
-    }
-    return store.save_memory(task_id, memory)
+    return store.memory_service.record_result(
+        task_id, message, understanding, state, previous_state)
 
 
 def store_chat_attachment(path, task):
@@ -470,8 +572,20 @@ def store_ground_truth_annotation(path, task, target_image_path):
     store = TaskStore(TASK_ROOT)
     current = task if isinstance(task, dict) and task.get("id") else store.create_task()
     source_path = path.get("path") if isinstance(path, dict) else getattr(path, "name", path)
+    from core.input_contract import evidence_matches
+    persisted = store.load_task(current['id'])
+    old_gt = persisted.get('ground_truth') or persisted.get('inactive_ground_truth') or {}
+    if old_gt and not evidence_matches(old_gt, target_image_path) and str(source_path) in {
+            old_gt.get('source_upload_path'), old_gt.get('annotation_path')}:
+        source_path = None
     if not source_path:
-        return store.load_task(current["id"])
+        from core.input_contract import evidence_matches
+        current = store.load_task(current["id"])
+        if not evidence_matches(current.get("ground_truth"), target_image_path):
+            current["inactive_ground_truth"] = current.get("ground_truth") or current.get("inactive_ground_truth")
+            current["ground_truth"] = None
+            store._write_json(store.task_dir(current["id"]) / "task.json", current)
+        return current
     if not Path(source_path).is_file():
         raise gr.Error("无法读取同图 Ground Truth 文件，请重新上传。")
     if not target_image_path or not Path(target_image_path).is_file():
@@ -482,6 +596,17 @@ def store_ground_truth_annotation(path, task, target_image_path):
         raise gr.Error(f"同图 Ground Truth 无法使用：{exc}") from exc
     return store.load_task(current["id"])
 
+
+
+def preview_ground_truth_upload(path, task, image_path, previous_state=None):
+    target = _resolve_task_image(image_path, task, previous_state)
+    current = store_ground_truth_annotation(path, task, target)
+    ground_truth = current.get('ground_truth') or {}
+    extraction = ground_truth.get('extraction') or {}
+    inferred = extraction.get('source_kind') == 'colored_contour'
+    note = ('彩色轮廓推断预览：使用闭运算、外轮廓填充及面积过滤，请核对孔洞和小目标。原始上传文件已独立保留。'
+            if inferred else '二值标签预览：保持逐像素标签，允许空目标；原始上传文件已独立保留。')
+    return current, gr.update(value=ground_truth.get('mask_path'), visible=bool(ground_truth)), note if ground_truth else ''
 
 def store_chat_attachment_ui(path, task):
     attachment, label, current = store_chat_attachment(path, task)
@@ -583,61 +708,6 @@ def _format_agent_process(events, running=False):
     return format_progress_card(events, running=running)
 
 
-def _progress_event(stage, label, detail=None, status="running", duration_seconds=None):
-    event = {
-        "stage": stage,
-        "label": label,
-        "status": status,
-    }
-    if detail:
-        event["detail"] = detail
-    if duration_seconds is not None:
-        event["duration_seconds"] = round(float(duration_seconds), 3)
-    return event
-
-
-def _merge_progress_event(events, event):
-    stage = event.get("stage")
-    event_type = event.get("type")
-    if event_type == "llm_chunk":
-        existing = next((item for item in reversed(events) if item.get("type") == "llm_chunk"), None)
-        if existing is not None:
-            existing["content"] = f"{existing.get('content', '')}{event.get('content', '')}"
-            return
-        events.append(dict(event))
-        return
-    if event_type and not stage:
-        events.append(dict(event))
-        return
-    for index in range(len(events) - 1, -1, -1):
-        if events[index].get("stage") == stage:
-            events[index] = event
-            return
-    events.append(event)
-
-
-def _candidate_progress_events(state):
-    events = []
-    selected = state.get("selected_candidate")
-    for index, attempt in enumerate(state.get("candidate_attempts") or [], start=1):
-        status = attempt.get("status")
-        if attempt.get("name") == selected:
-            detail = "已经找到目标并生成标注。"
-        elif status == "no_annotation":
-            detail = "这次没有找到目标，系统会自动换一种方法。"
-        elif status == "failed":
-            detail = "这次方法没有运行成功，系统会自动换一种方法。"
-        else:
-            detail = "这次检查已完成。"
-        events.append(_progress_event(
-            f"pipeline_{attempt.get('index', len(events))}",
-            f"识别方法 {index}",
-            detail,
-            "completed" if status == "completed" else "failed",
-        ))
-    return events
-
-
 def _state_process_events(state):
     events = []
     for event in state.get("trajectory") or []:
@@ -652,6 +722,8 @@ def _state_process_events(state):
             "revise_candidates": "自动换一种方法",
             "report_failure": "识别未成功",
             "decide_next_action": "准备人工验收",
+            "wait_for_human": "等待人工确认",
+            "resume_after_human": "处理人工反馈",
             "evaluate_quality": "检查标注输出",
             "refine_candidates": "自动调整候选算法",
         }.get(node, node or "执行步骤")
@@ -660,17 +732,37 @@ def _state_process_events(state):
             label,
             _trajectory_progress_detail(event),
             event.get("status", "completed"),
-            event.get("duration_seconds"),
+            event.get("duration_seconds") or None,
         ))
-    events.extend(_candidate_progress_events(state))
+    candidate_events = _candidate_progress_events(state)
+    # 候选方案行属于各次尝试的汇总，应出现在"识别未成功"总结之前。
+    summary_index = next(
+        (index for index, item in enumerate(events) if item.get("stage") == "report_failure"),
+        None,
+    )
+    if summary_index is None:
+        events.extend(candidate_events)
+    else:
+        events[summary_index:summary_index] = candidate_events
     return events
 
 
 def _trajectory_progress_detail(event):
     node = event.get("node")
     details = event.get("details") or {}
+    if node == "resume_after_human":
+        action = str(details.get("action") or "")
+        action_label = {
+            "accept": "已确认结果",
+            "continue": "用户要求继续修改",
+            "exit": "用户结束任务",
+        }.get(action)
+        return action_label or "已收到人工反馈，继续处理。"
     if node == "plan_candidates":
         return "识别方法已经准备好。"
+    if node == "prepare_inputs":
+        target = str(details.get("target_image_path") or "")
+        return f"已载入图片：{Path(target).name}" if target else "输入已校验。"
     if node == "execute_candidates":
         if not details.get("selected_candidate"):
             return "这次没有找到可用目标，系统将自动换一种方法。"
@@ -678,7 +770,11 @@ def _trajectory_progress_detail(event):
             "已经找到目标并生成标注。"
         )
     if node == "review_candidates":
-        return str(details.get("reason") or "正在检查这次识别结果。")
+        reason = str(details.get("reason") or "")
+        return _DECISION_DETAIL_LABELS.get(
+            reason.strip().lower(),
+            reason or "正在检查这次识别结果。",
+        )
     if node == "decide_next_action":
         return str(details.get("reason") or "标注结果已生成，等待人工验收。")
     if node == "revise_candidates":
@@ -691,7 +787,8 @@ def _trajectory_progress_detail(event):
         return "根据上一轮反馈自动调整候选算法。"
     if "previous_quality" in details or "score" in details:
         return "执行记录已完成。"
-    return json.dumps(details, ensure_ascii=False, default=str)[:500]
+    readable = _format_node_metadata(details)
+    return readable or "执行记录已完成。"
 
 
 def _artifact_command(message):
@@ -719,8 +816,22 @@ def _handle_artifact_command(command, message, history, task, previous_state):
     has_result = bool(
         isinstance(previous_state, dict) and previous_state.get("annotated_image_path")
     )
+    # 空结果（未检出目标）时 Mask/量测没有查看意义，只保留结果图。
+    has_annotation = bool(
+        isinstance(previous_state, dict) and previous_state.get("selected_candidate")
+    )
+    review_allowed = not (
+        isinstance(task, dict) and task.get("status") in {"accepted", "exited"}
+    )
+    no_artifact_reply = "当前任务还没有可查看的算法产物。请先上传图片并描述检测目标。"
+    empty_reply = "这一轮没有标出任何目标，没有可查看的 Mask 和量测数据。可以补充目标的位置或特征让我重试。"
     if not has_result and command != "hide":
-        reply = "当前任务还没有可查看的算法产物。请先上传图片并描述检测目标。"
+        reply = no_artifact_reply
+        result_update = gr.update(visible=False)
+        mask_update = gr.update(visible=False)
+        panel_update = gr.update(visible=False)
+    elif command in {"mask", "measurements"} and not has_annotation:
+        reply = empty_reply
         result_update = gr.update(visible=False)
         mask_update = gr.update(visible=False)
         panel_update = gr.update(visible=False)
@@ -738,7 +849,7 @@ def _handle_artifact_command(command, message, history, task, previous_state):
         reply = "已展开本轮量测明细。"
         result_update = gr.update(visible=False)
         mask_update = gr.update(visible=False)
-        panel_update = gr.update(visible=True)
+        panel_update = gr.update(visible=True, open=True)
     else:
         reply = "已收起本轮图片、Mask 和量测明细。"
         result_update = gr.update(visible=False)
@@ -749,6 +860,7 @@ def _handle_artifact_command(command, message, history, task, previous_state):
         store = TaskStore(TASK_ROOT)
         store.append_message(task["id"], "user", message)
         store.append_message(task["id"], "assistant", reply)
+    show_artifacts = has_result and command != "hide"
     return (
         messages,
         result_update,
@@ -759,10 +871,11 @@ def _handle_artifact_command(command, message, history, task, previous_state):
         task,
         "",
         "",
-        gr.update(visible=has_result),
+        gr.update(visible=show_artifacts and review_allowed),
         gr.update(visible=True),
         gr.update(value=None),
         gr.update(value=None),
+        gr.update(visible=show_artifacts),
     )
 
 
@@ -770,14 +883,24 @@ def _inline_result_messages(state):
     messages = []
     annotated = state.get("annotated_image_path")
     if annotated:
-        messages.append({
-            "role": "assistant",
-        "content": "这是本轮标注结果。点击图片放大，检查标注是否符合你的描述。",
-        })
-        messages.append({
-            "role": "assistant",
-            "content": (annotated, "点击放大标注结果"),
-        })
+        if state.get("selected_candidate"):
+            messages.append({
+                "role": "assistant",
+                "content": "这是本轮标注结果。点击图片放大，检查标注是否符合你的描述。",
+            })
+            messages.append({
+                "role": "assistant",
+                "content": (annotated, "点击放大标注结果"),
+            })
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": "这一轮没有标出目标。原图如下，方便你补充描述需要标注的位置和特征。",
+            })
+            messages.append({
+                "role": "assistant",
+                "content": (annotated, "查看原图"),
+            })
     return messages
 
 
@@ -803,6 +926,80 @@ def _recover_agent_state(task, previous_state):
         return previous_state
 
 
+# Graph-node rows in the live timeline: Chinese labels for node_complete and
+# human-readable keys for node metadata.
+_NODE_LABELS = {
+    "prepare_inputs": "校验输入",
+    "understand_task": "视觉理解",
+    "retrieve_algorithms": "查找相似经验",
+    "plan_candidates": "生成候选方案",
+    "execute_candidates": "执行候选算法",
+    "review_candidates": "评估候选结果",
+    "revise_candidates": "调整候选算法",
+    "decide_next_action": "准备人工验收",
+    "wait_for_human": "等待人工确认",
+    "resume_after_human": "处理人工反馈",
+    "report_failure": "总结失败原因",
+}
+_NODE_META_LABELS = {
+    "candidate_count": "候选数",
+    "reference_template_count": "参考模板",
+    "match_count": "相似记录",
+    "revision_count": "重试次数",
+    "attempt_count": "尝试次数",
+    "selected_candidate": "选定方案",
+    "revised": "已修订",
+    "accepted": "已验收",
+    "provider": "服务商",
+    "strategy": "策略",
+}
+
+# review/reason 字段里的内部 decision 值 → 用户可读描述。
+_DECISION_DETAIL_LABELS = {
+    "decision revise": "自动检查未通过，准备换一种方法重试。",
+    "decision present": "检查通过，等待人工确认。",
+}
+
+# Nodes whose story the UI already reports with richer coarse-grained events
+# (准备输入 / 视觉理解 / 查找相似经验 / 准备识别方法); raw node rows for them
+# would only duplicate and leak JSON into the timeline.
+_COVERED_PROGRESS_NODES = {
+    "prepare_inputs",
+    "understand_task",
+    "retrieve_algorithms",
+    "plan_candidates",
+}
+
+
+def _format_node_metadata(metadata) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    parts = []
+    for key, value in metadata.items():
+        if value in (None, "", [], {}) or key in {"matches", "match_reasons"}:
+            continue
+        label = _NODE_META_LABELS.get(key, key)
+        if key == "selected_candidate" and isinstance(value, str):
+            value = short_candidate_name(value)
+        elif isinstance(value, (list, dict)):
+            # 集合类字段只报数量，避免把内部结构直接倒给用户。
+            value = f"{len(value)} 项"
+        parts.append(f"{label} {value}")
+    return "；".join(parts)[:200]
+
+
+# 候选尝试的子步骤（emit_thinking 的 context 键）与收尾信号。
+_ATTEMPT_START_CONTEXT = "execute_candidate"
+_ATTEMPT_SUBSTEP_CONTEXTS = {
+    "apply_constraints",
+    "evaluate_quality",
+    "measure_components",
+    "save_visualization",
+}
+_ATTEMPT_CLOSING_CONTEXTS = {"all_failed", "select_best", "save_final_results"}
+
+
+@logged_operation("run_chat_agent")
 def run_chat_agent(
     image_path,
     message,
@@ -821,44 +1018,90 @@ def run_chat_agent(
         if progress_callback:
             progress_callback(dict(event))
 
+    # Pair tool_call/tool_result events by tool name so each call renders as a
+    # single timeline row that flips from running to completed with a duration.
+    tool_seq = [0]
+    pending_tool_calls = {}
+    # 每个候选尝试一个分组（ZCode 式工具树）：execute_candidate 标记开新组，
+    # 组内随后产生的子步骤/工具调用都挂到该组下。
+    attempt_state = {"count": 0, "current": None}
+
     def agent_event_listener(event):
         """捕获 Agent 内部事件并转换为进度报告"""
         event_type = event.get("type")
         if event_type == "node_start":
+            node = event.get("node")
+            if node in _COVERED_PROGRESS_NODES:
+                return
             report(_progress_event(
-                event.get("node"),
-                event.get("description", event.get("node")),
+                node,
+                event.get("description") or _NODE_LABELS.get(node, node),
                 "执行中...",
                 "running",
             ))
         elif event_type == "node_complete":
+            node = event.get("node")
+            if node in _COVERED_PROGRESS_NODES:
+                return
             report(_progress_event(
-                event.get("node"),
-                event.get("node"),
-                json.dumps(event.get("metadata", {}), ensure_ascii=False)[:200],
+                node,
+                _NODE_LABELS.get(node, node),
+                _format_node_metadata(event.get("metadata")),
                 "completed",
                 event.get("duration"),
             ))
         elif event_type == "thinking":
+            context = event.get("context")
+            if context == _ATTEMPT_START_CONTEXT:
+                attempt_state["count"] += 1
+                group_stage = f"attempt:{attempt_state['count']}"
+                attempt_state["current"] = group_stage
+                raw_name = str(event.get("message") or "").split(":", 1)[-1].strip()
+                report({
+                    "type": "group",
+                    "stage": group_stage,
+                    "label": f"识别方法 {attempt_state['count']}",
+                    "name": raw_name,
+                    "status": "running",
+                })
+                return
+            if context in _ATTEMPT_CLOSING_CONTEXTS:
+                attempt_state["current"] = None
             report({
                 "type": "thinking",
                 "message": event.get("message"),
-                "context": event.get("context"),
+                "context": context,
+                "group": attempt_state["current"] if context in _ATTEMPT_SUBSTEP_CONTEXTS else None,
                 "timestamp": event.get("timestamp"),
             })
         elif event_type == "tool_call":
+            tool = str(event.get("tool") or "unknown")
+            tool_seq[0] += 1
+            stage = f"tool:{tool_seq[0]}:{tool}"
+            pending_tool_calls[tool] = {
+                "stage": stage,
+                "started": time.time(),
+            }
             report({
                 "type": "tool_call",
-                "tool": event.get("tool"),
+                "stage": stage,
+                "tool": tool,
                 "args": event.get("args") or event.get("parameters"),
+                "group": attempt_state["current"],
                 "timestamp": event.get("timestamp"),
             })
         elif event_type == "tool_result":
+            tool = str(event.get("tool") or "unknown")
+            pending = pending_tool_calls.pop(tool, None)
+            started = pending["started"] if pending else (event.get("timestamp") or time.time())
             report({
                 "type": "tool_result",
-                "tool": event.get("tool"),
+                "stage": pending["stage"] if pending else None,
+                "tool": tool,
                 "result": event.get("result"),
                 "success": event.get("success", True),
+                "duration_seconds": max(0.0, time.time() - float(started)),
+                "group": attempt_state["current"],
                 "timestamp": event.get("timestamp"),
             })
         elif event_type == "llm_request":
@@ -873,7 +1116,10 @@ def run_chat_agent(
             report({
                 "type": "llm_response",
                 "provider": event.get("provider"),
+                "model": event.get("model"),
                 "content_preview": event.get("content_preview"),
+                "usage": event.get("usage"),
+                "context_window": event.get("context_window"),
                 "timestamp": event.get("timestamp"),
             })
         elif event_type == "llm_chunk":
@@ -894,278 +1140,343 @@ def run_chat_agent(
 
     register_event_listener(agent_event_listener)
 
-    message = (message or "").strip()
-    submitted_attachment_path = image_path if image_path and Path(image_path).exists() else None
-    command = _artifact_command(message)
-    if command:
-        return _handle_artifact_command(command, message, history, task, previous_state)
-    image_path = _resolve_task_image(image_path, task, previous_state)
-    if not image_path:
-        raise gr.Error("请先点击 + 上传一张图片。")
-    if not message:
-        raise gr.Error("请描述希望 Agent 标注的目标或效果。")
+    try:
+        message = (message or "").strip()
+        submitted_attachment_path = image_path if image_path and Path(image_path).exists() else None
+        command = _artifact_command(message)
+        if command:
+            return _handle_artifact_command(command, message, history, task, previous_state)
+        image_path = _resolve_task_image(image_path, task, previous_state)
+        if not image_path:
+            raise gr.Error("请先点击 + 上传一张图片。")
+        if not message:
+            raise gr.Error("请描述希望 Agent 标注的目标或效果。")
 
-    store = TaskStore(TASK_ROOT)
-    current = task if isinstance(task, dict) and task.get("id") else store.create_task()
-    task_id = current["id"]
-    current = store_reference_examples(reference_example_paths, current)
-    current = store_ground_truth_annotation(
-        ground_truth_annotation_path,
-        current,
-        image_path,
-    )
-    reference_examples = current.get("reference_examples") or []
-    ground_truth = current.get("ground_truth") or {}
-    previous_state = _recover_agent_state(current, previous_state)
-    task_memory = _task_memory_context(store, task_id)
-    original_task_goal = (
-        (previous_state or {}).get("original_task_goal")
-        or task_memory.get("task_goal")
-        or message
-    )
-    if previous_state is not None:
-        previous_state["original_task_goal"] = original_task_goal
-    report(_progress_event("prepare", "准备输入", f"已载入图片：{Path(image_path).name}", "completed"))
-    try:
-        previous_state = save_canvas_feedback(
-            editor_value,
+        store = TaskStore(TASK_ROOT)
+        current = task if isinstance(task, dict) and task.get("id") else store.create_task()
+        task_id = current["id"]
+        bind_context(task_id=task_id)
+        current = store_reference_examples(reference_example_paths, current)
+        current = store_ground_truth_annotation(
+            ground_truth_annotation_path,
             current,
-            previous_state,
-            green_editor_value=green_editor_value,
+            image_path,
         )
-    except ValueError as exc:
-        raise gr.Error(str(exc)) from exc
-    if previous_state:
-        feedback = dict(previous_state.get("human_feedback") or {})
-        if message:
-            feedback["incremental_description"] = message
-        for key in ("include_mask_path", "exclude_mask_path"):
-            if previous_state.get(key):
-                feedback[key] = previous_state[key]
-        if feedback:
-            previous_state["human_feedback"] = feedback
-    if submitted_attachment_path:
-        store.append_message(
-            task_id,
-            "user",
-            (str(submitted_attachment_path), Path(submitted_attachment_path).name),
+        reference_examples = current.get("reference_examples") or []
+        ground_truth = current.get("ground_truth") or {}
+        previous_state = _recover_agent_state(current, previous_state)
+        previous_state, memory_context = store.memory_service.prepare(
+            task_id, message, image_path, previous_state, history)
+        from core.input_contract import input_identity
+        previous_state = {**(previous_state or {}), **input_identity(image_path), "target_image_path": str(image_path)}
+        task_memory = memory_context["task_memory"]
+        original_task_goal = (
+            (previous_state or {}).get("original_task_goal")
+            or task_memory.get("task_goal")
+            or message
         )
-    store.append_message(task_id, "user", message)
-    understanding_started = time.monotonic()
-    report(_progress_event("understand_task", "视觉理解", "正在分析图片并确定需要标注的区域。"))
-    provider_name = "Qwen"
-    try:
-        provider = build_runtime_provider()
-        provider_name = f"Qwen ({provider.model})"
-        provider_context = {
-            "original_task_goal": original_task_goal,
-            "conversation": list(history or [])[-12:],
-            "task_memory": task_memory,
-            "previous_strategy": (previous_state or {}).get("strategy"),
-            "previous_pipeline": (previous_state or {}).get("pipeline"),
-            "previous_measurements": (previous_state or {}).get("measurements", {}).get("summary"),
-            "previous_quality": (previous_state or {}).get("quality_report"),
-            "previous_result_image_path": (previous_state or {}).get("annotated_image_path"),
-            "previous_mask_path": (previous_state or {}).get("predicted_mask_path"),
-            "feedback_image_path": (previous_state or {}).get("feedback_image_path"),
-            "feedback_layer_path": (previous_state or {}).get("feedback_layer_path"),
-            "feedback_pixel_count": (previous_state or {}).get("feedback_pixel_count"),
-            "human_feedback": (previous_state or {}).get("human_feedback", {}),
-            "reference_examples": reference_examples,
-            "ground_truth": ground_truth,
-        }
+        if previous_state is not None:
+            previous_state["original_task_goal"] = original_task_goal
+        report(_progress_event("prepare", "准备输入", f"已载入图片：{Path(image_path).name}", "completed"))
+        if memory_context.get('input_changed'):
+            editor_value = green_editor_value = None
         try:
-            understanding = provider.understand_task(
-                image_path,
-                message,
-                previous_context=provider_context,
-                reference_examples=reference_examples,
+            previous_state = save_canvas_feedback(
+                editor_value,
+                current,
+                previous_state,
+                green_editor_value=green_editor_value,
             )
-        except TypeError as exc:
-            if "reference_examples" not in str(exc):
-                raise
-            understanding = provider.understand_task(
-                image_path,
-                message,
-                previous_context=provider_context,
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        if previous_state:
+            feedback = dict(previous_state.get("human_feedback") or {})
+            if message:
+                feedback["incremental_description"] = message
+            for key in ("include_mask_path", "exclude_mask_path"):
+                if previous_state.get(key):
+                    feedback[key] = previous_state[key]
+            if feedback:
+                previous_state["human_feedback"] = feedback
+        if submitted_attachment_path:
+            store.append_message(
+                task_id,
+                "user",
+                (str(submitted_attachment_path), Path(submitted_attachment_path).name),
             )
-    except Exception as exc:
+        store.append_message(task_id, "user", message)
+        understanding_started = time.monotonic()
+        report(_progress_event("understand_task", "视觉理解", "正在分析图片并确定需要标注的区域。"))
+        provider_name = "Qwen"
+        try:
+            provider = build_runtime_provider()
+            provider_name = f"Qwen ({provider.model})"
+            provider_context = {
+                **memory_context,
+                "original_task_goal": original_task_goal,
+                "conversation": memory_context["conversation"],
+                "task_memory": task_memory,
+                "previous_strategy": (previous_state or {}).get("strategy"),
+                "previous_pipeline": (previous_state or {}).get("pipeline"),
+                "previous_measurements": (previous_state or {}).get("measurements", {}).get("summary"),
+                "previous_quality": (previous_state or {}).get("quality_report"),
+                "previous_result_image_path": (previous_state or {}).get("annotated_image_path"),
+                "previous_mask_path": (previous_state or {}).get("predicted_mask_path"),
+                "feedback_image_path": (previous_state or {}).get("feedback_image_path"),
+                "feedback_layer_path": (previous_state or {}).get("feedback_layer_path"),
+                "feedback_pixel_count": (previous_state or {}).get("feedback_pixel_count"),
+                "human_feedback": (previous_state or {}).get("human_feedback", {}),
+                "reference_examples": reference_examples,
+                "ground_truth": ground_truth,
+                "ground_truth_mask_path": ground_truth.get("mask_path"),
+                "task_contract": (previous_state or {}).get("task_contract"),
+                "selected_experiment_id": (previous_state or {}).get("selected_experiment_id"),
+                "review": (previous_state or {}).get("review"),
+            }
+            from core.experiments.lifecycle import revision_evidence
+            provider_context['execution_feedback'] = {'attempts': revision_evidence({
+                **(previous_state or {}), **provider_context, 'target_image_path': image_path,
+            })}
+            store.memory_service.context_manifest(task_id, provider_context)
+            try:
+                understanding = provider.understand_task(
+                    image_path,
+                    message,
+                    previous_context=provider_context,
+                    reference_examples=reference_examples,
+                )
+            except TypeError as exc:
+                if "reference_examples" not in str(exc):
+                    raise
+                understanding = provider.understand_task(
+                    image_path,
+                    message,
+                    previous_context=provider_context,
+                )
+        except Exception as exc:
+            understanding_duration = time.monotonic() - understanding_started
+            logger.exception("Visual understanding failed")
+            error_message = f"任务规划失败：{type(exc).__name__}: {exc}"
+            report(_progress_event(
+                "understand_task", "视觉理解", error_message, "failed", understanding_duration,
+            ))
+            store.save_node_result(
+                task_id,
+                "understand_task",
+                {"image_path": image_path, "description": message, "provider": "qwen"},
+                {},
+                understanding_duration,
+                status="failed",
+                error=error_message,
+            )
+            store.append_message(task_id, "assistant", error_message)
+            raise gr.Error(error_message) from exc
+        task_memory = store.memory_service.apply_updates(
+            task_id, message, understanding, memory_context["memory_source_id"])
+        memory_context = {**provider_context, "task_memory": task_memory}
         understanding_duration = time.monotonic() - understanding_started
-        error_message = f"Qwen视觉理解失败：{type(exc).__name__}: {exc}"
         report(_progress_event(
-            "understand_task", "视觉理解", error_message, "failed", understanding_duration,
+            "understand_task", "视觉理解", f"已生成任务理解（{provider_name}）。", "completed", understanding_duration,
         ))
+        retrieved_algorithms = []
+        if not (previous_state or {}).get("pipeline"):
+            report(_progress_event("retrieve_algorithms", "查找相似经验", "正在查找以前处理过的相似图片。"))
+            retrieved_algorithms = store.search_algorithms(
+                understanding,
+                limit=2,
+                min_score=0.2,
+            )
+            store.append_event(task_id, "algorithm_search_completed", {
+                "match_count": len(retrieved_algorithms),
+                "matches": [
+                    {
+                        "algorithm_id": item.get("algorithm_id"),
+                        "name": item.get("name"),
+                        "score": item.get("score"),
+                        "match_reasons": item.get("match_reasons", []),
+                        "source_task_id": item.get("source_task_id"),
+                    }
+                    for item in retrieved_algorithms
+                ],
+            })
+            report(_progress_event(
+                "retrieve_algorithms", "查找相似经验", f"找到了 {len(retrieved_algorithms)} 个相似记录。", "completed",
+            ))
+        else:
+            report(_progress_event("retrieve_algorithms", "查找相似经验", "这次会参考上一轮的结果。", "completed"))
         store.save_node_result(
             task_id,
             "understand_task",
-            {"image_path": image_path, "description": message, "provider": "qwen"},
-            {},
-            understanding_duration,
-            status="failed",
-            error=error_message,
-        )
-        store.append_message(task_id, "assistant", error_message)
-        raise gr.Error(error_message) from exc
-    understanding_duration = time.monotonic() - understanding_started
-    report(_progress_event(
-        "understand_task", "视觉理解", f"已生成任务理解（{provider_name}）。", "completed", understanding_duration,
-    ))
-    retrieved_algorithms = []
-    if not (previous_state or {}).get("pipeline"):
-        report(_progress_event("retrieve_algorithms", "查找相似经验", "正在查找以前处理过的相似图片。"))
-        retrieved_algorithms = store.search_algorithms(
+            {"image_path": image_path, "description": message},
             understanding,
-            limit=2,
-            min_score=0.2,
+            understanding_duration,
         )
-        store.append_event(task_id, "algorithm_search_completed", {
-            "match_count": len(retrieved_algorithms),
-            "matches": [
-                {
-                    "algorithm_id": item.get("algorithm_id"),
-                    "name": item.get("name"),
-                    "score": item.get("score"),
-                    "match_reasons": item.get("match_reasons", []),
-                    "source_task_id": item.get("source_task_id"),
-                }
-                for item in retrieved_algorithms
-            ],
-        })
-        report(_progress_event(
-            "retrieve_algorithms", "查找相似经验", f"找到了 {len(retrieved_algorithms)} 个相似记录。", "completed",
-        ))
-    else:
-        report(_progress_event("retrieve_algorithms", "查找相似经验", "这次会参考上一轮的结果。", "completed"))
-    store.save_node_result(
-        task_id,
-        "understand_task",
-        {"image_path": image_path, "description": message},
-        understanding,
-        understanding_duration,
-    )
-    understanding_message = _format_understanding(
-        understanding,
-        provider_name,
-        understanding_duration,
-        retrieved_algorithms=retrieved_algorithms,
-    )
-    if not _task_memory_context(store, task_id).get("task_goal"):
-        current = store.set_title(
-            task_id,
-            understanding.get("task_summary") or message,
+        understanding_message = _format_understanding(
+            understanding,
+            provider_name,
+            understanding_duration,
+            retrieved_algorithms=retrieved_algorithms,
         )
-    store.append_message(task_id, "assistant", understanding_message)
+        if not _task_memory_context(store, task_id).get("task_goal"):
+            current = store.set_title(
+                task_id,
+                understanding.get("task_summary") or message,
+            )
+        store.append_message(task_id, "assistant", understanding_message)
 
-    execution_started = time.monotonic()
-    report(_progress_event("plan_candidates", "准备识别方法", "正在选择适合这张图片的识别方法。"))
-    report(_progress_event("execute_candidates", "识别目标", "正在查找并标出目标。"))
-    selected_strategy = understanding["recommended_strategy"]
-    state = run_agent_graph(
-        target_image_path=image_path,
-        description=message,
-        understanding=understanding,
-        output_root=ROOT / "outputs",
-        unit="pixel",
-        max_candidates=3,
-        previous_state=previous_state,
-        retrieved_algorithms=retrieved_algorithms,
-        reference_examples=reference_examples,
-        ground_truth_mask_path=ground_truth.get("mask_path"),
-        ground_truth_annotation_path=ground_truth.get("annotation_path"),
-        algorithm_registry=store.algorithm_registry,
-        provider=provider,
-    )
-    state["memory_summary"] = _save_task_memory(
-        store,
-        task_id,
-        message,
-        understanding,
-        state,
-        previous_state,
-    )
-    execution_duration = time.monotonic() - execution_started
-    trajectory = state.get("trajectory") or []
-    for event in trajectory:
-        if event.get("node") in {"plan_candidates", "execute_candidates", "decide_next_action"}:
-            report(_progress_event(
-                event.get("node"),
-                {
-                    "plan_candidates": "准备识别方法",
-                    "execute_candidates": "识别目标",
-                    "decide_next_action": "准备人工验收",
-                }.get(event.get("node"), event.get("node")),
-                _trajectory_progress_detail(event),
-                "completed",
-                event.get("duration_seconds"),
-            ))
-    for event in _candidate_progress_events(state):
-        report(event)
-    store.save_node_result(
-        task_id,
-        "execute_candidate",
-        {
-            "candidate": "qwen_recommended_strategy",
-            "provider": provider_name,
-            "strategy": selected_strategy,
-            "selected_pipeline": state.get("pipeline"),
-            "candidate_attempts": state.get("candidate_attempts"),
-            "retrieved_algorithms": state.get("retrieved_algorithms"),
-            "reference_examples": reference_examples,
-            "ground_truth": ground_truth or None,
-        },
-        {
-            "annotated_image_path": state.get("annotated_image_path"),
-            "predicted_mask_path": state.get("predicted_mask_path"),
-            "measurements": state.get("measurements"),
-            "quality_report": state.get("quality_report"),
-            "iteration": state.get("iteration"),
-            "parent_iteration": state.get("parent_iteration"),
-            "pipeline": state.get("pipeline"),
-            "pipeline_diff": state.get("pipeline_diff"),
-            "decision": state.get("decision"),
-            "trajectory": state.get("trajectory"),
-            "evaluation_report": state.get("evaluation_report"),
-            "ground_truth_mask_path": state.get("ground_truth_mask_path"),
-        },
-        execution_duration,
-    )
-    messages = list(history or [])
-    messages.extend(_user_submission_messages(message, submitted_attachment_path))
-    messages.append({"role": "assistant", "content": understanding_message})
-    result_messages = state_to_chat_messages(state)
-    result_messages[-1]["content"] += (
-        f"\n\n本次识别用时 {execution_duration:.1f}s。"
-        "我把标注结果作为下一条图片消息发给你。请只看结果是否符合你的描述："
-        "符合就选“标注准确”，否则选“有漏标或错标”。"
-    )
-    pipeline_changes = state.get("pipeline_diff", {}).get("changes") or []
-    if state.get("parent_iteration") is not None:
-        result_messages[-1]["content"] += (
-            f"\n\n系统根据上一次结果自动调整了识别方法，共修改了 {len(pipeline_changes)} 处。"
+        execution_started = time.monotonic()
+        report(_progress_event("plan_candidates", "准备识别方法", "正在选择适合这张图片的识别方法。"))
+        report(_progress_event("execute_candidates", "识别目标", "正在查找并标出目标。"))
+        selected_strategy = understanding["recommended_strategy"]
+        state = run_agent_graph(
+            target_image_path=image_path,
+            description=message,
+            understanding=understanding,
+            output_root=ROOT / "outputs",
+            unit="pixel",
+            max_candidates=1,
+            previous_state=previous_state,
+            retrieved_algorithms=retrieved_algorithms,
+            reference_examples=reference_examples,
+            ground_truth_mask_path=ground_truth.get("mask_path"),
+            ground_truth_annotation_path=ground_truth.get("annotation_path"),
+            algorithm_registry=store.algorithm_registry,
+            provider=provider,
+            memory_context=memory_context,
         )
-    result_messages[-1]["content"] += "\n\n" + format_task_card(state)
-    inline_messages = _inline_result_messages(state)
-    messages.extend(result_messages)
-    messages.extend(inline_messages)
-    for item in [*result_messages, *inline_messages]:
-        store.append_message(task_id, item["role"], item["content"])
-    current = store.load_task(task_id)
-    unregister_event_listener(agent_event_listener)
-    return (
-        messages,
-        gr.update(value=state.get("annotated_image_path"), visible=False),
-        gr.update(value=state.get("predicted_mask_path"), visible=False),
-        gr.update(visible=False),
-        measurement_rows(state),
-        state,
-        current,
-        "",
-        "",
-        gr.update(visible=True),
-        gr.update(visible=True),
-        gr.update(value=None),
-        gr.update(value=None),
-    )
+        state["memory_summary"] = _save_task_memory(
+            store,
+            task_id,
+            message,
+            understanding,
+            state,
+            previous_state,
+        )
+        execution_duration = time.monotonic() - execution_started
+        trajectory = state.get("trajectory") or []
+        for event in trajectory:
+            if event.get("node") in {"plan_candidates", "execute_candidates", "decide_next_action"}:
+                report(_progress_event(
+                    event.get("node"),
+                    {
+                        "plan_candidates": "准备识别方法",
+                        "execute_candidates": "识别目标",
+                        "decide_next_action": "准备人工验收",
+                    }.get(event.get("node"), event.get("node")),
+                    _trajectory_progress_detail(event),
+                    "completed",
+                    event.get("duration_seconds"),
+                ))
+        for event in _candidate_progress_events(state):
+            report(event)
+        store.save_node_result(
+            task_id,
+            "execute_candidate",
+            {
+                "candidate": "qwen_recommended_strategy",
+                "provider": provider_name,
+                "strategy": selected_strategy,
+                "selected_pipeline": state.get("pipeline"),
+                "candidate_attempts": state.get("candidate_attempts"),
+                "retrieved_algorithms": state.get("retrieved_algorithms"),
+                "reference_examples": reference_examples,
+                "ground_truth": ground_truth or None,
+            },
+            {
+                "annotated_image_path": state.get("annotated_image_path"),
+                "predicted_mask_path": state.get("predicted_mask_path"),
+                "measurements": state.get("measurements"),
+                "quality_report": state.get("quality_report"),
+                "iteration": state.get("iteration"),
+                "parent_iteration": state.get("parent_iteration"),
+                "pipeline": state.get("pipeline"),
+                "pipeline_diff": state.get("pipeline_diff"),
+                "decision": state.get("decision"),
+                "trajectory": state.get("trajectory"),
+                "evaluation_report": state.get("evaluation_report"),
+                "ground_truth_mask_path": state.get("ground_truth_mask_path"),
+            },
+            execution_duration,
+        )
+        messages = list(history or [])
+        messages.extend(_user_submission_messages(message, submitted_attachment_path))
+        messages.append({"role": "assistant", "content": understanding_message})
+        result_messages = state_to_chat_messages(state)
+        # 空结果（未检出目标）不能按"验收成功结果"的话术引导用户。
+        if state.get("selected_candidate"):
+            result_messages[-1]["content"] += (
+                f"\n\n本次识别用时 {execution_duration:.1f}s。"
+                "我把标注结果作为下一条图片消息发给你。请只看结果是否符合你的描述："
+                "符合就选“标注准确”，否则选“有漏标或错标”。"
+            )
+        else:
+            result_messages[-1]["content"] += (
+                f"\n\n本次识别用时 {execution_duration:.1f}s。"
+                "这一轮没有标出目标。你可以在下方补充目标的位置、颜色、大致尺寸等线索让我重试，或直接结束任务。"
+            )
+        pipeline_changes = state.get("pipeline_diff", {}).get("changes") or []
+        if state.get("parent_iteration") is not None:
+            result_messages[-1]["content"] += (
+                f"\n\n系统根据上一次结果自动调整了识别方法，共修改了 {len(pipeline_changes)} 处。"
+            )
+        result_messages[-1]["content"] += "\n\n" + format_task_card(state)
+        inline_messages = _inline_result_messages(state)
+        messages.extend(result_messages)
+        messages.extend(inline_messages)
+        for item in [*result_messages, *inline_messages]:
+            store.append_message(task_id, item["role"], item["content"])
+        current = store.load_task(task_id)
+        return (
+            messages,
+            gr.update(value=state.get("annotated_image_path"), visible=False),
+            gr.update(value=state.get("predicted_mask_path"), visible=False),
+            gr.update(visible=False),
+            measurement_rows(state),
+            state,
+            current,
+            "",
+            "",
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(value=None),
+            gr.update(value=None),
+            gr.update(visible=True),
+        )
+
+    finally:
+        unregister_event_listener(agent_event_listener)
+
+
+def render_topbar(context_chip=""):
+    """Topbar HTML; the context-usage chip slot updates as LLM usage arrives."""
+    chip = f'<div class="topbar-context">{context_chip}</div>' if context_chip else ""
+    return f"""
+                    <div id="annotation-topbar">
+                      <div class="title"><span class="topbar-project">DRAM 缺陷量测</span><span class="topbar-divider">/</span>算法开发</div>
+                      <div class="status"><span class="dot"></span>本地存储{chip}</div>
+                    </div>
+                    """
+
+
+def _merge_context_usage(usage_state, event):
+    """Track context-window usage from llm_response events for the topbar chip.
+
+    事件不带 usage（如 review 的二次预览事件）时不更新，保持最近一次真实统计。
+    """
+    if event.get("type") != "llm_response":
+        return
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
+        return
+    usage_state["last"] = usage
+    window = event.get("context_window")
+    if isinstance(window, (int, float)) and window > 0:
+        usage_state["window"] = int(window)
+    if event.get("model"):
+        usage_state["model"] = event["model"]
+    total = usage.get("total_tokens")
+    if isinstance(total, (int, float)) and total > 0:
+        usage_state["turn_tokens"] = int(usage_state.get("turn_tokens") or 0) + int(total)
 
 
 def run_chat_agent_stream(
@@ -1183,17 +1494,23 @@ def run_chat_agent_stream(
     submitted_attachment_path = image_path if image_path and Path(image_path).exists() else None
     stream_image_path = _resolve_task_image(image_path, task, previous_state) or image_path
     if _artifact_command(message) or not stream_image_path or not message:
-        yield run_chat_agent(
+        yield (*run_chat_agent(
             stream_image_path, message, history, task, previous_state, editor_value,
             green_editor_value=green_editor_value,
             reference_example_paths=reference_example_paths,
             ground_truth_annotation_path=ground_truth_annotation_path,
-        )
+        ), gr.update())
         return
     image_path = stream_image_path
 
     working_messages = list(history or [])
     process_events = []
+    # 上下文窗口用量（Codex 式顶栏徽章）：由 llm_response 事件累积。
+    usage_state = {}
+
+    def context_output():
+        chip = format_context_usage(usage_state)
+        return render_topbar(chip) if chip else gr.update()
 
     def process_message(running=True):
         return _format_agent_process(process_events, running=running)
@@ -1224,15 +1541,25 @@ def run_chat_agent_stream(
         gr.update(visible=True),
         gr.update(value=editor_value),
         gr.update(value=green_editor_value),
+        gr.update(),
+        context_output(),
     )
 
-    updates = queue.Queue()
+    updates = queue.Queue(maxsize=512)
     result_holder = {}
+    from core.request_control import RequestControl, RequestCancelled, control
+    request_control = RequestControl.from_env()
 
     def report(event):
-        updates.put(event)
+        request_control.check()
+        try:
+            updates.put_nowait(event)
+        except queue.Full:
+            # Only UI progress is lossy; durable events remain in the task store.
+            pass
 
     def worker():
+        token = control.set(request_control)
         try:
             try:
                 result_holder["value"] = run_chat_agent(
@@ -1253,27 +1580,47 @@ def run_chat_agent_stream(
                 result_holder["value"] = run_chat_agent(
                     image_path, message, history, task, previous_state, editor_value,
                 )
-        except Exception as exc:
-            result_holder["error"] = exc
+        except (Exception, RequestCancelled) as exc:
+            result_holder["error"] = RuntimeError(str(exc)) if isinstance(exc, RequestCancelled) else exc
         finally:
-            updates.put(None)
+            control.reset(token)
+            result_holder['done'] = True
 
-    thread = threading.Thread(target=worker, daemon=True)
+    from contextvars import copy_context
+    worker_context = copy_context()
+    thread = threading.Thread(target=lambda: worker_context.run(worker), daemon=True)
     thread.start()
-    while True:
-        event = updates.get()
-        if event is None:
-            break
-        _merge_progress_event(process_events, event)
-        live_messages = list(working_messages)
-        live_messages[-1] = {"role": "assistant", "content": process_message(True)}
-        yield (
-            live_messages,
-            gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
-            measurement_rows(previous_state or {}), previous_state, task, "", "",
-            gr.update(visible=False), gr.update(visible=True), gr.update(value=editor_value),
-            gr.update(value=green_editor_value),
-        )
+    try:
+        while True:
+            try:
+                request_control.check()
+            except RequestCancelled as exc:
+                result_holder['error'] = RuntimeError(str(exc))
+                break
+            try:
+                event = updates.get(timeout=0.2)
+            except queue.Empty:
+                if result_holder.get('done'):
+                    break
+                continue
+            if event is None:
+                break
+            _merge_progress_event(process_events, event)
+            _merge_context_usage(usage_state, event)
+            live_messages = list(working_messages)
+            live_messages[-1] = {"role": "assistant", "content": process_message(True)}
+            yield (
+                live_messages,
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                measurement_rows(previous_state or {}), previous_state, task, "", "",
+                gr.update(visible=False), gr.update(visible=True), gr.update(value=editor_value),
+                gr.update(value=green_editor_value),
+                gr.update(),
+                context_output(),
+            )
+
+    finally:
+        request_control.cancelled.set()
 
     if "error" not in result_holder:
         final_result = result_holder["value"]
@@ -1286,13 +1633,21 @@ def run_chat_agent_stream(
             if isinstance(final_result[6], dict) and final_result[6].get("id"):
                 TaskStore(TASK_ROOT).append_message(final_result[6]["id"], "assistant", process_content)
             final_result = (final_messages, *final_result[1:])
-        yield final_result
+        yield (*final_result, context_output())
         return
 
     try:
         raise result_holder["error"]
     except Exception as exc:
-        detail = _friendly_processing_error(exc)
+        logger.exception(
+            "Image processing failed (task_id=%s, image_path=%s)",
+            task.get("id") if isinstance(task, dict) else None,
+            image_path,
+        )
+        detail = _friendly_processing_error(
+            exc,
+            task_id=task.get("id") if isinstance(task, dict) else None,
+        )
         failed_messages = list(history or [])
         failed_messages.extend(_user_submission_messages(message, submitted_attachment_path))
         failed_messages.append({
@@ -1322,16 +1677,39 @@ def run_chat_agent_stream(
             gr.update(visible=True),
             gr.update(value=editor_value),
             gr.update(value=green_editor_value),
+            gr.update(visible=has_previous_result),
+            context_output(),
         )
 
 
-def _friendly_processing_error(exc):
-    detail = getattr(exc, "message", None) or str(exc) or ""
+_ERROR_DETAIL_MAX_CHARS = 400
+
+
+def _sanitize_error_detail(detail):
+    """把异常文本压成一段可直接展示的原因：过滤密钥与图片数据，压平换行并截断。"""
+    collapsed = " ".join(redact(str(detail or "")).split())
+    if len(collapsed) > _ERROR_DETAIL_MAX_CHARS:
+        return collapsed[:_ERROR_DETAIL_MAX_CHARS] + "…"
+    return collapsed
+
+
+def _friendly_processing_error(exc, task_id=None):
+    detail = _sanitize_error_detail(getattr(exc, "message", None) or str(exc))
     if detail.startswith("这次没有成功标出目标。"):
+        return detail
+    if isinstance(exc, gr.Error) and detail:
+        # gr.Error 的文案本来就是写给用户的操作提示，直接透传。
         return detail
     if "empty annotations" in detail or "empty_annotation" in detail:
         return "这次没有成功标出目标。系统已经自动换过识别方法，但仍然没有得到可用结果。"
-    return "这次没有处理成功。系统已保留执行记录，请稍后重试。"
+    if isinstance(exc, TypeError) and "is not JSON serializable" in detail:
+        return "这次没有处理成功：保存结果时遇到数据格式错误。请联系维护人员检查服务端错误日志。"
+    type_name = type(exc).__name__
+    reason = detail if type_name in detail else f"{type_name}: {detail or '未提供具体原因'}"
+    record_note = (
+        f"系统已保留执行记录（任务 {task_id}）" if task_id else "系统已保留执行记录"
+    )
+    return f"这次没有处理成功。失败原因：{reason.rstrip('。')}。{record_note}，请稍后重试。"
 
 
 def submit_canvas_feedback(
@@ -1406,6 +1784,7 @@ def handle_result_action(action, image_path, history, task, previous_state, feed
                 gr.update(visible=True),
                 gr.update(value=None),
                 gr.update(value=None),
+                gr.update(visible=False),
             )
         user_message = "标注准确"
         acceptance = store.accept_result(task["id"], updated_state)
@@ -1422,7 +1801,7 @@ def handle_result_action(action, image_path, history, task, previous_state, feed
         current = store.load_task(task["id"])
         prompt_update = gr.update(
             value="",
-            placeholder="描述需要修改的地方，例如：右上角有漏检…",
+            placeholder=FEEDBACK_PLACEHOLDER,
         )
     elif action == "exit":
         user_message = "结束任务"
@@ -1442,6 +1821,8 @@ def handle_result_action(action, image_path, history, task, previous_state, feed
 
     show_canvas = action == "continue"
     canvas_background = updated_state.get("annotated_image_path") or image_path
+    # 验收/继续修改后结果仍存在，保留产物查看入口；退出任务则一并收起。
+    show_artifacts = action in {"accept", "continue"}
 
     messages = list(history or [])
     if action != "continue":
@@ -1465,6 +1846,7 @@ def handle_result_action(action, image_path, history, task, previous_state, feed
         gr.update(visible=True),
         gr.update(value=_editor_value(canvas_background) if show_canvas else None),
         gr.update(value=_editor_value(canvas_background) if show_canvas else None),
+        gr.update(visible=show_artifacts),
     )
 
 
@@ -1476,8 +1858,8 @@ def _resume_human_review(store, task_id, state, action, **response_fields):
         response = {"action": action, **{key: value for key, value in response_fields.items() if value}}
         resumed = resume_agent_graph(thread_id, response)
     except Exception as exc:
-        # File-backed state remains usable after an app restart, when the
-        # in-memory LangGraph checkpoint is no longer available.
+        # Legacy file-backed results remain usable if a checkpoint is missing
+        # (for example, a task created before SQLite checkpoint migration).
         store.append_event(task_id, "human_review_resume_unavailable", {
             "thread_id": thread_id,
             "action": action,
@@ -1517,12 +1899,7 @@ def cancel_feedback_canvas():
 def reset_chat_task():
     task = create_chat_task()
     return (
-        [
-            {
-                "role": "assistant",
-                "content": "新任务已创建。请点击 + 上传图片，然后描述希望 Agent 标注的目标或效果。",
-            }
-        ],
+        [],
         gr.update(value=None, visible=False),
         gr.update(value=None, visible=False),
         gr.update(visible=False),
@@ -1530,27 +1907,29 @@ def reset_chat_task():
         None,
         task,
         None,
-        "",
+        gr.update(value="", placeholder=NEW_TASK_PLACEHOLDER),
         "",
         gr.update(visible=False),
         gr.update(visible=True),
         gr.update(value=None),
         gr.update(value=None),
         gr.update(value=None),
-        gr.update(choices=_task_choices(task["id"]), value=task["id"]),
+        task_history_update(task["id"]),
         gr.update(value=None),
+        gr.update(visible=False),
     )
 
 
 def build_annotation_app():
     theme = gr.themes.Soft(
-        primary_hue="gray",
-        secondary_hue="gray",
-        neutral_hue="gray",
+        primary_hue="zinc",
+        secondary_hue="zinc",
+        neutral_hue="zinc",
         radius_size="sm",
-        font=["Inter", "sans-serif"],
+        font=["-apple-system", "BlinkMacSystemFont", "Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"],
+        font_mono=["SF Mono", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
     )
-    with gr.Blocks(title="DRAM 视觉算法开发 Agent", theme=theme, css=load_styles()) as app:
+    with gr.Blocks(title="量测 Vision · DRAM 缺陷量测", theme=theme, css=load_styles(), fill_width=True) as app:
         task_state = gr.State(value=None)
         attachment_state = gr.State(value=None)
         agent_state = gr.State(value=None)
@@ -1559,56 +1938,83 @@ def build_annotation_app():
                 gr.HTML(
                     """
                     <div id="annotation-brand">
-                      <div class="brand-mark">CV</div>
-                      <div><h1>Vision Agent</h1><p>DRAM 视觉算法开发工作区</p></div>
+                      <div class="brand-mark">LC</div>
+                      <div><h1>量测 <span>Vision</span></h1><p>视觉算法工作台</p></div>
                     </div>
-                    """
+                    """, elem_id="annotation-brand-container",
                 )
                 new_task_button = gr.Button(
                     "＋ 新建标注任务",
                     variant="secondary",
                     elem_id="annotation-new-task",
                 )
-                task_history = gr.Dropdown(
+                task_history = gr.Dataset(
                     label="历史任务",
-                    choices=_task_choices(),
-                    interactive=True,
+                    components=_TASK_DATASET_COMPONENTS,
+                    component_props=_TASK_DATASET_PROPS,
+                    headers=["任务ID", "标题", "状态"],
+                    samples=_task_samples(),
+                    samples_per_page=_TASK_LIST_LIMIT,
                     elem_id="annotation-task-history",
                 )
-                resume_task_button = gr.Button(
-                    "继续所选任务",
-                    variant="secondary",
-                    elem_id="annotation-resume-task",
+                with gr.Row(elem_id="annotation-task-actions"):
+                    rename_box = gr.Textbox(
+                        show_label=False,
+                        placeholder="重命名当前任务",
+                        max_lines=1,
+                        scale=3,
+                        elem_id="annotation-rename-box",
+                    )
+                    rename_button = gr.Button(
+                        "重命名",
+                        variant="secondary",
+                        scale=1,
+                        elem_id="annotation-rename-task",
+                    )
+                delete_task_button = gr.Button(
+                    "删除当前任务",
+                    variant="stop",
+                    elem_id="annotation-delete-task",
                 )
+                delete_armed = gr.State(value=False)
                 gr.HTML(
                     """
-                    <div class="sidebar-group-label">工作区</div>
-                    <div class="sidebar-nav active"><span class="nav-glyph">□</span>算法开发</div>
-                    <div class="sidebar-group-label">项目</div>
-                    <div class="sidebar-project"><span class="project-dot"></span>DRAM 缺陷量测</div>
-                    """
+                    <div class="sidebar-group-label">当前项目</div>
+                    <div class="sidebar-nav active"><span class="project-dot"></span>DRAM 缺陷量测</div>
+                    <div class="sidebar-project">视觉算法开发</div>
+                    """, elem_id="annotation-project-info",
                 )
-                gr.HTML('<div class="sidebar-spacer"></div>')
-                gr.HTML('<div class="sidebar-footer"><span class="footer-dot"></span>本地工作区</div>')
+                gr.HTML('<div class="sidebar-spacer"></div>', elem_id="annotation-sidebar-spacer")
+                gr.HTML('<div class="sidebar-footer"><span class="footer-dot"></span>本地工作区</div>', elem_id="annotation-sidebar-footer")
 
             with gr.Column(elem_id="annotation-main"):
-                gr.HTML(
-                    """
-                    <div id="annotation-topbar">
-                      <div class="title">DRAM 缺陷量测 Agent</div>
-                      <div class="status"><span class="dot"></span>仅保存在本地</div>
-                    </div>
-                    """
-                )
+                topbar_status = gr.HTML(render_topbar())
                 with gr.Column(elem_id="annotation-chat"):
                     gr.HTML(
                         """
                         <div id="annotation-welcome">
-                          <h2>今天想处理什么？</h2>
-                          <p>上传一张图片，用自然语言描述希望 Agent 标注的目标或效果。</p>
+                          <div class="welcome-eyebrow">LIANGCE VISION</div>
+                          <h2>从一张图像，开始精准量测</h2>
+                          <p>DRAM 缺陷检测与视觉算法开发</p>
                         </div>
                         """
                     )
+                    sample_buttons = []
+                    samples = [
+                        ("颗粒缺陷", "in_film_particle_middle_defect.jpg", "标注图中的颗粒缺陷，测量面积和数量。"),
+                        ("周期结构", "in_film_particle_left_pattern.jpg", "标注图中的周期结构，测量各区域的面积和数量。"),
+                        ("局部精测", "in_film_particle_right_defect_tight.jpg", "精确标注图中颗粒缺陷的轮廓，测量面积。"),
+                    ]
+                    with gr.Row(elem_id="annotation-samples"):
+                        for title, filename, description in samples:
+                            with gr.Column(min_width=0, elem_classes=["sample-item"]):
+                                gr.Image(
+                                    value=str(ROOT / "data" / "samples" / filename),
+                                    show_label=False, interactive=False, height=112,
+                                    show_download_button=False, show_fullscreen_button=False,
+                                    elem_classes=["sample-image"],
+                                )
+                                sample_buttons.append(gr.Button(title + "  ↗", elem_classes=["sample-button"]))
                     chatbot = gr.Chatbot(
                         value=[],
                         type="messages",
@@ -1647,10 +2053,7 @@ def build_annotation_app():
                     elem_id="annotation-feedback-canvas",
                 ) as feedback_canvas:
                     gr.HTML(
-                        '<div class="feedback-canvas-note">'
-                        '两个画板分别固定为红色误检（需要删除）和绿色漏检（需要补充）；'
-                        '标记完成后请同时写一句修改说明。'
-                        '</div>'
+                        '<div class="feedback-canvas-note">修正标注</div>'
                     )
                     # ImageEditor does not reliably preserve two tabbed canvas
                     # instances in Gradio. Keeping both canvases mounted makes
@@ -1705,8 +2108,7 @@ def build_annotation_app():
                 ) as next_actions:
                     gr.HTML(
                         """
-                        <div class="next-action-title">这个标注准确吗？</div>
-                        <div class="next-action-note">只需检查算法标注是否符合你的描述，不需要判断处理方法。</div>
+                        <div class="next-action-title">确认标注结果</div>
                         """
                     )
                     with gr.Row(elem_classes=["next-action-row", "primary-action-row"]):
@@ -1722,7 +2124,11 @@ def build_annotation_app():
                             "结束任务",
                             elem_id="annotation-exit",
                         )
-                    with gr.Row(elem_classes=["next-action-row", "artifact-action-row"]):
+                with gr.Group(
+                    visible=False,
+                    elem_id="annotation-artifact-actions",
+                ) as artifact_actions:
+                    with gr.Row(elem_classes=["artifact-action-row"]):
                         show_mask_button = gr.Button("查看 Mask")
                         show_measurements_button = gr.Button("量测明细")
                 with gr.Column(elem_id="annotation-composer"):
@@ -1746,6 +2152,13 @@ def build_annotation_app():
                         visible=False,
                         elem_id="annotation-attachment-preview",
                     )
+                    prompt = gr.Textbox(
+                        placeholder="描述需要检测的目标、轮廓或量测要求…",
+                        show_label=False,
+                        lines=2,
+                        max_lines=5,
+                        elem_id="annotation-prompt",
+                    )
                     with gr.Row(elem_id="annotation-composer-row"):
                         attach_button = gr.UploadButton(
                             "+",
@@ -1755,7 +2168,7 @@ def build_annotation_app():
                             file_types=["image"],
                         )
                         with gr.Accordion(
-                            "Handbook 示例",
+                            "参考示例",
                             open=False,
                             elem_id="annotation-handbook-examples",
                         ):
@@ -1766,7 +2179,7 @@ def build_annotation_app():
                                 type="filepath",
                             )
                         with gr.Accordion(
-                            "Ground Truth",
+                            "真值标注",
                             open=False,
                             elem_id="annotation-ground-truth",
                         ):
@@ -1776,12 +2189,9 @@ def build_annotation_app():
                                 file_types=["image"],
                                 type="filepath",
                             )
-                        prompt = gr.Textbox(
-                            placeholder="描述你要标注的区域，或询问下一步怎么做...",
-                            show_label=False,
-                            lines=1,
-                            elem_id="annotation-prompt",
-                        )
+                            ground_truth_preview = gr.Image(label="用于评估的 Mask 预览", visible=False, interactive=False)
+                            ground_truth_note = gr.Markdown("")
+                        gr.HTML('<span class="composer-context">图像量测</span>', elem_id="annotation-composer-spacer")
                         send_button = gr.Button("↑", elem_id="annotation-send")
 
         agent_outputs = [
@@ -1798,6 +2208,7 @@ def build_annotation_app():
             feedback_canvas,
             feedback_editor,
             green_feedback_editor,
+            artifact_actions,
         ]
         resume_outputs = [
             *agent_outputs[:7],
@@ -1811,7 +2222,27 @@ def build_annotation_app():
             handbook_examples,
             task_history,
             ground_truth_annotation,
+            artifact_actions,
         ]
+
+        def select_sample(task, filename, description, current_prompt=""):
+            # 不覆盖用户已输入的描述，仅在输入框为空时填充示例提示。
+            return (
+                *store_chat_attachment_ui(str(ROOT / "data" / "samples" / filename), task),
+                current_prompt or description,
+            )
+
+        for sample_button, (_, filename, description) in zip(sample_buttons, samples):
+            sample_button.click(
+                fn=lambda task, current_prompt, filename=filename, description=description: select_sample(
+                    task, filename, description, current_prompt,
+                ),
+                inputs=[task_state, prompt],
+                outputs=[attachment_state, attachment_label, task_state, view_attachment_button,
+                         clear_attachment_button, attachment_preview, prompt],
+                show_progress="hidden",
+                show_api=False,
+            )
 
         attach_button.upload(
             fn=store_chat_attachment_ui,
@@ -1848,6 +2279,12 @@ def build_annotation_app():
             show_progress="hidden",
             show_api=False,
         )
+        ground_truth_annotation.upload(
+            fn=preview_ground_truth_upload,
+            inputs=[ground_truth_annotation, task_state, attachment_state, agent_state],
+            outputs=[task_state, ground_truth_preview, ground_truth_note],
+            show_progress="hidden", show_api=False,
+        )
         prompt_event = prompt.submit(
             fn=run_chat_agent_stream,
             inputs=[
@@ -1855,8 +2292,9 @@ def build_annotation_app():
                 feedback_editor, green_feedback_editor, handbook_examples,
                 ground_truth_annotation,
             ],
-            outputs=agent_outputs,
+            outputs=[*agent_outputs, topbar_status],
             show_progress="hidden",
+            trigger_mode="once",
             show_api=False,
         )
         prompt_event.then(
@@ -1876,6 +2314,12 @@ def build_annotation_app():
             js=SHOW_LATEST_RESULT_JS,
             show_progress="hidden",
             show_api=False,
+        ).then(
+            fn=refresh_task_history,
+            inputs=[task_state],
+            outputs=[task_history],
+            show_progress="hidden",
+            show_api=False,
         )
         send_event = send_button.click(
             fn=run_chat_agent_stream,
@@ -1884,8 +2328,9 @@ def build_annotation_app():
                 feedback_editor, green_feedback_editor, handbook_examples,
                 ground_truth_annotation,
             ],
-            outputs=agent_outputs,
+            outputs=[*agent_outputs, topbar_status],
             show_progress="hidden",
+            trigger_mode="once",
             show_api=False,
         )
         send_event.then(
@@ -1905,6 +2350,12 @@ def build_annotation_app():
             js=SHOW_LATEST_RESULT_JS,
             show_progress="hidden",
             show_api=False,
+        ).then(
+            fn=refresh_task_history,
+            inputs=[task_state],
+            outputs=[task_history],
+            show_progress="hidden",
+            show_api=False,
         )
         submit_feedback_event = submit_feedback_button.click(
             fn=submit_canvas_feedback,
@@ -1913,7 +2364,7 @@ def build_annotation_app():
                 feedback_editor, green_feedback_editor, handbook_examples,
                 ground_truth_annotation,
             ],
-            outputs=agent_outputs,
+            outputs=[*agent_outputs, topbar_status],
             js=CLOSE_FEEDBACK_SUBMIT_JS,
             show_progress="hidden",
             trigger_mode="once",
@@ -1922,6 +2373,12 @@ def build_annotation_app():
         submit_feedback_event.then(
             fn=None,
             js=SHOW_LATEST_RESULT_JS,
+            show_progress="hidden",
+            show_api=False,
+        ).then(
+            fn=refresh_task_history,
+            inputs=[task_state],
+            outputs=[task_history],
             show_progress="hidden",
             show_api=False,
         )
@@ -1941,8 +2398,14 @@ def build_annotation_app():
                     handbook_examples,
                     task_history,
                     ground_truth_annotation,
+                    artifact_actions,
                 ]
             ),
+            show_progress="hidden",
+            show_api=False,
+        ).then(
+            fn=None,
+            js=CLOSE_FEEDBACK_CANCEL_JS,
             show_progress="hidden",
             show_api=False,
         ).then(
@@ -1952,10 +2415,29 @@ def build_annotation_app():
             show_progress="hidden",
             show_api=False,
         )
-        resume_task_button.click(
-            fn=resume_chat_task,
+        rename_button.click(
+            fn=rename_chat_task,
+            inputs=[rename_box, task_state],
+            outputs=[task_state, rename_box, task_history],
+            show_progress="hidden",
+            show_api=False,
+        )
+        delete_task_button.click(
+            fn=delete_chat_task,
+            inputs=[delete_armed, task_state, *resume_outputs],
+            outputs=[delete_task_button, delete_armed, *resume_outputs],
+            show_progress="hidden",
+            show_api=False,
+        )
+        task_history.click(
+            fn=resume_from_history,
             inputs=[task_history],
             outputs=resume_outputs,
+            show_progress="hidden",
+            show_api=False,
+        ).then(
+            fn=None,
+            js=CLOSE_FEEDBACK_CANCEL_JS,
             show_progress="hidden",
             show_api=False,
         ).then(
@@ -1970,10 +2452,16 @@ def build_annotation_app():
             show_progress="hidden",
             show_api=False,
         )
+        # 页面打开始终是新任务；历史任务由侧栏列表手动选择恢复。
         app.load(
-            fn=load_latest_chat_task,
+            fn=reset_chat_task,
             inputs=[],
             outputs=resume_outputs,
+            show_progress="hidden",
+            show_api=False,
+        ).then(
+            fn=None,
+            js=CLOSE_FEEDBACK_CANCEL_JS,
             show_progress="hidden",
             show_api=False,
         ).then(
@@ -2006,11 +2494,18 @@ def build_annotation_app():
                     else CLOSE_FEEDBACK_ACTION_JS
                 ),
                 show_progress="hidden",
+                trigger_mode="once",
                 show_api=False,
             )
             action_event.then(
                 fn=None,
                 js=SHOW_LATEST_RESULT_JS if action == "continue" else SCROLL_CHAT_JS,
+                show_progress="hidden",
+                show_api=False,
+            ).then(
+                fn=refresh_task_history,
+                inputs=[task_state],
+                outputs=[task_history],
                 show_progress="hidden",
                 show_api=False,
             )
@@ -2030,6 +2525,17 @@ def build_annotation_app():
             show_progress="hidden",
             queue=False,
             cancels=[submit_feedback_event],
+            show_api=False,
+        )
+        app.load(
+            fn=None,
+            js="""() => {
+                for (const [id, label] of [['annotation-attach', '上传图像'], ['annotation-send', '发送']]) {
+                    const button = document.getElementById(id);
+                    button?.setAttribute('aria-label', label);
+                    button?.setAttribute('title', label);
+                }
+            }""",
             show_api=False,
         )
     return app

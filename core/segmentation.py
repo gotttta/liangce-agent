@@ -109,17 +109,17 @@ def _apply_morphology(mask, morphology):
         return mask.astype(bool)
 
     try:
-        from skimage.morphology import binary_closing, binary_opening, disk
+        from skimage.morphology import closing, opening, disk
     except ImportError:
         return mask.astype(bool)
 
     footprint = disk(1)
     if morphology == "open":
-        return binary_opening(mask, footprint).astype(bool)
+        return opening(mask, footprint, mode="ignore").astype(bool)
     if morphology == "close":
-        return binary_closing(mask, footprint).astype(bool)
+        return closing(mask, footprint, mode="ignore").astype(bool)
     if morphology == "open_then_close":
-        return binary_closing(binary_opening(mask, footprint), footprint).astype(bool)
+        return closing(opening(mask, footprint, mode="ignore"), footprint, mode="ignore").astype(bool)
     if morphology == "close_then_open":
-        return binary_opening(binary_closing(mask, footprint), footprint).astype(bool)
+        return opening(closing(mask, footprint, mode="ignore"), footprint, mode="ignore").astype(bool)
     return mask.astype(bool)

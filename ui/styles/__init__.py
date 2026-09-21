@@ -4,12 +4,9 @@ from pathlib import Path
 
 
 _STYLE_FILES = (
-    "legacy.css",
     "base.css",
-    "sidebar.css",
+    "layout.css",
     "chat.css",
-    "canvas.css",
-    "responsive.css",
 )
 
 
