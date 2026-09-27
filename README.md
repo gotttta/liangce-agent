@@ -2,11 +2,11 @@
 
 Local single-user industrial vision Agent for developing reproducible defect-detection pipelines.
 
-The current v2 flow:
+The production flow:
 
 - runs one canonical LangGraph workflow for CLI and web requests
-- uses Alibaba Cloud Qwen for visual task understanding, one Pipeline per iteration, and independent visual review
-- retrieves matching user-accepted algorithms as a possible starting point for a single experiment
+- uses the configured Alibaba Cloud model for one proposal action at a time and independent visual review
+- rebuilds model context from the current draft, experiment records, fixed requirements and accumulated read evidence
 - validates every operator, artifact type, parameter, and pipeline step locally
 - executes experiments deterministically with OpenCV/skimage operators in a bounded sandbox
 - applies deterministic user include/exclude constraints before measuring and rendering results
@@ -49,8 +49,9 @@ Skill instructions guide the planning and verification of that Pipeline.
 
 New v3 nodes use `operator`, legacy JSON Skill dependencies use
 `required_operators`, and replay records use `operator_versions`.
-Agent action JSON keeps `tool` alongside
-`type: "call_tool"`. Old Pipeline fields `tool` and `tool_versions`, and workspace
+Production Agent actions use `kind: "tool"` with `tool` and `arguments`, or
+`kind: "needs_input"`. Independent review returns `review` or read-only `read` actions.
+The legacy planning protocol retains `type: "call_tool"`. Old Pipeline fields `tool` and `tool_versions`, and workspace
 Skill field `required_tools`, are converted on read; conflicting Pipeline aliases
 are rejected. The legacy sequential `steps` format retains its `op` field.
 
@@ -123,7 +124,7 @@ Create `.env` in the project root:
 ```bash
 DASHSCOPE_API_KEY="your-api-key"
 ALIYUN_BASE_URL="your-openai-compatible-url"
-ALIYUN_VISION_MODEL="deepseek-flash"
+ALIYUN_VISION_MODEL="deepseek-v4.1-flash"
 ```
 
 `ALIYUN_API_KEY` can be used instead of `DASHSCOPE_API_KEY`.
@@ -154,71 +155,104 @@ python3 -m ui.app
 
 Open `http://127.0.0.1:7860`.
 
-Web requests have no overall time limit by default. To enable one, set
-`LIANGCE_REQUEST_TIMEOUT_SECONDS` to a positive number of seconds before starting
-the service; unset it or use `0` to disable it. Restart an existing service after
-changing this setting. Model network timeouts, Docker sandbox limits, planning
-round limits, and cooperative cancellation still apply.
+Production controller runs have a 600-second deadline by default. An optional
+`LIANGCE_REQUEST_TIMEOUT_SECONDS` adds an enclosing request deadline; unset or
+`0` disables that extra limit, not the controller deadline. Restart an existing
+service after changing configuration. Browser disconnection currently cancels
+the active web request; it does not leave an independent background job running.
 
 `ui.app` is the supported web entry point. Both the CLI and web UI execute the canonical graph in
-`core/agent_graph.py`; `graph_workflow.py` remains only as a compatibility import for older callers.
+`core/agent_graph.py`.
 
-The graph nodes are:
+The production Aliyun provider uses explicit LangGraph business nodes:
 
 ```text
-prepare_inputs
-  -> understand_task
-  -> retrieve_algorithms
-  -> plan_candidates
-  -> execute_candidates
-  -> review_candidates
-  -> (revise_candidates -> execute_candidates, bounded by max_auto_revisions)
-  -> decide_next_action
-  -> wait_for_human
-  -> END
+initialize_run -> prepare_task -> agent_decision <-> tool_execution
+                                      |
+                              validate_submission
+                                      |
+                                quality_review <-> review_evidence
+                                  |       |
+                       agent_decision   wait_for_human -> finish
+
+budget exhausted / cancelled / failed -> finish (retains artifacts and reason)
 ```
 
-A failed review or an exhausted revision budget routes to `report_failure`, which also waits at the same
-`wait_for_human` interrupt.
+There is one Agent loop. The model decides when to create/edit a draft, execute,
+inspect intermediate evidence, compare experiments, and submit an executed result.
+Saving a draft does not execute it. Executing a draft returns to the Agent without
+automatic review. Submission verifies persisted scope, algorithm, runtime and
+artifact hashes before independent quality review; it never reruns the algorithm.
+The shortest successful path takes four model calls: create, execute, submit,
+review. Reads, edits and comparisons use the same global call allowance.
+No production node invokes an inner `PlanningSession`.
+
+Providers exposing `agent_action` use this graph (version 2). Providers exposing
+only `propose_action`, and version-one persisted checkpoints, retain the earlier
+controller/effect graph. Legacy/mock providers and explicit `understanding` retain
+the legacy graph. Recovery selects the persisted graph version instead of silently
+migrating an unfinished run. `max_candidates` and calibration remain legacy options.
 
 The responsibilities are intentionally split:
 
-- **Qwen**: understands the image and description, proposes a structured Pipeline, and compares
+- **Vision provider**: understands the image and description, proposes a structured Pipeline, and compares
   rendered candidate overlays. Generated Python runs only in the Docker execution environment.
 - **Local executor**: validates the Pipeline DSL, dispatches registered and generated operators to Docker, applies brush constraints,
   measures connected components, and writes reproducible artifacts.
 - **User**: makes the final visual acceptance decision. The runtime does not replace this decision with
   an automatic quality score or an `acceptable/uncertain/failed` label.
 
-After `decide_next_action`, LangGraph creates a `human_review` interrupt. The web UI resumes that
+When the controller enters `awaiting_feedback`, LangGraph creates a `human_review` interrupt. The web UI resumes that
 same graph thread when the user accepts, continues editing, or exits; resuming the interrupt itself
 does not rerun a candidate. When the user submits new text or brush feedback, the next iteration uses
 the previous state and feedback to plan a new Pipeline. Task artifacts and graph state are also written
-to disk for cross-restart result recovery; LangGraph checkpoints now use SQLite (`workspace/checkpoints.sqlite3`, override with `LIANGCE_CHECKPOINT_PATH`). See [memory design](docs/MEMORY.md).
+to disk for explicit cross-restart recovery. SQLite checkpoints use
+`durability='sync'` (`workspace/checkpoints.sqlite3`, overridden with
+`LIANGCE_CHECKPOINT_PATH`); a task file lock prevents simultaneous writers.
+Action receipts distinguish prepared, completed and unknown work. Completed
+receipts are replayed without another call; an unknown model request stops
+conservatively. Execution recovery verifies saved artifacts, scope and runtime,
+and checks/cleans the action's deterministically named Docker container first.
+There is no automatic startup scan or automatic resubmission of unknown work.
+Checkpoints currently include full dictionaries, not only artifact references.
+See [current Agent workflow](docs/2026-09-22-tool-agent-workflow.md).
 
-The graph and Web UI default to one experiment per iteration (`max_candidates=1`), with at most
-two automatic revisions (`max_auto_revisions=2`). The model writes one final Pipeline and uses
-execution evidence, intermediate images, and visual review to explain the next targeted change.
-The planner never fills a candidate quota or reruns the previous Pipeline as a mandatory baseline.
-Repeated rejected Pipelines are not executed again within the automatic revision loop.
+### Controller limits
 
-`compare_candidates` remains an on-demand tool for existing experiment IDs: compare two supported
-methods, investigate stalled revisions, or check a new version against a verified baseline.
-Comparisons require matching input and task/feedback constraints. Legacy API callers can explicitly
-raise `max_candidates` for batch experiments or `max_calibration_candidates` for Ground Truth
-calibration; calibration now defaults to **0**. Ground Truth evaluation and visual review remain active.
+| Variable | Default | Meaning |
+|---|---|---|
+| `LIANGCE_RUN_TIMEOUT_SECONDS` | `600` | Overall automatic-run deadline, retained across recovery |
+| `LIANGCE_RUN_MAX_MODEL_CALLS` | `10` | Shared proposal, review, read follow-up and retry allowance |
+| `LIANGCE_RUN_MAX_EXECUTIONS` | `3` | Maximum reserved executions; also capped by `max_auto_revisions + 1` |
+| `LIANGCE_MODEL_CALL_TIMEOUT_SECONDS` | `120` | Controller ceiling for one model action |
+| `LIANGCE_ACTION_MAX_OUTPUT_TOKENS` | `8192` | Model response limit, valid from `256` to `16384` |
+| `LIANGCE_REQUEST_TIMEOUT_SECONDS` | unset | Optional enclosing deadline; `0` disables only this extra limit |
+
+The action provider shares the 120-second configured default; an explicit provider
+`timeout_seconds` remains respected. Legacy provider methods retain their 90-second
+default. The effective action deadline is the minimum of the provider limit,
+controller ceiling and remaining run/request time. Proposal calls additionally leave a completion reserve, 50 seconds
+under defaults. Single JSON requests use a cancellable total deadline and no SDK
+retries; the controller allows at most one eligible network retry per run and
+charges it to the shared allowance. Execution reservations are counted before
+the effect begins; static draft validation does not consume one. Limits are
+persisted with the run, and stopping never requires an extra model call.
 
 Each experiment's `experiment.json` preserves the algorithm version, parent experiment, hypothesis,
 change reason, expected change, outputs, and subsequent review/acceptance status. Graph state keeps
 `experiment_records` across revisions and user follow-ups. A `verified_baseline` is retained only
 after all automatic acceptance checks pass or the user explicitly accepts a rendered result.
-Failed revisions may roll back to that baseline only under identical input and acceptance conditions;
-the failed experiment and its review stay in history. Metrics alone never establish a verified baseline.
+The controller retains the most recent usable execution when a later attempt
+fails; retention does not imply that the result passed review. Scope includes
+input content, requirements, feedback masks and reference images/descriptions.
+Old acceptance cannot transfer to a changed scope. Metrics alone never establish
+a verified baseline.
 
 The runtime records factual mask statistics only. After execution, the vision provider checks the
 rendered experiment against the task criteria and writes a visual rationale. A single result still
 requires review; unavailable review leaves acceptance pending. It may request a bounded
-automatic revision, but it never creates a synthetic quality score. Final visual accuracy is still
+automatic revision, but it never creates a synthetic quality score. Without Ground Truth,
+these checks do not establish an accuracy improvement. Final visual accuracy is still
 decided at the human review boundary. Pixel processing remains bounded and auditable. The reusable
 operator catalog starts empty and contains only operators that a user has explicitly marked as tested.
 If the catalog is insufficient, the model may emit a custom operator
@@ -234,10 +268,10 @@ By default, the runtime calls Alibaba Cloud's OpenAI-compatible endpoint. Set:
 ```bash
 export DASHSCOPE_API_KEY="your-api-key"
 export ALIYUN_BASE_URL="your-openai-compatible-url"
-export ALIYUN_VISION_MODEL="deepseek-flash"
+export ALIYUN_VISION_MODEL="deepseek-v4.1-flash"
 ```
 
-The default model is `deepseek-flash`. If the API key or base URL is missing, the
+The default model is `deepseek-v4.1-flash`. If the API key or base URL is missing, the
 agent fails fast instead of falling back to a local mock.
 
 Run tests:
@@ -270,7 +304,9 @@ They are copied into the task's `references/` directory and recorded in
 Each run creates:
 
 ```text
-outputs/<timestamp>_agent_v2/
+outputs/<graph_thread_id>/
+├── actions/action_<n>/  # started record, saved result and completion receipt
+├── drafts/<draft_id>/revision_<n>.json
 └── iteration_0/
     ├── candidate_0/
     ├── candidate_summary.json
@@ -306,81 +342,72 @@ workspace/algorithms/<algorithm_id>/algorithm.json
 ```
 
 Each record includes the pipeline, defect and background characteristics, mask statistics,
-measurement summary, source task and acceptance metadata. For a new task, the agent searches
-this registry using structured task characteristics such as defect type, background pattern,
-measurement type and polarity. Matching pipelines are replayed as candidate baselines and must
-execute successfully on the current image; retrieval never bypasses local validation or human
-acceptance.
+measurement summary, source task and acceptance metadata. During preparation, the
+production controller retrieves up to two accepted algorithms using the current
+description and supplies their full Pipelines as procedural memory without an
+extra model call. A follow-up also retains the previous task Pipeline. The legacy
+graph uses its structured retrieval node. Reusing a saved method never bypasses
+validation or acceptance on the current image.
 
 ## Agent experiment tools
 
-The model receives a compact operator index and can request details with
-`query_operators`, load workflow guidance with `load_skill`,
-and inspect intermediate images with `inspect_artifact`.
+The Agent returns one validated JSON tool call per request:
 
-Planning uses a single editable algorithm draft and submits a saved experiment:
+```json
+{"kind":"tool","tool":"execute_pipeline","arguments":{"draft_id":"saved_draft","revision":1}}
+```
 
-- `save_task`: persist understanding and acceptance criteria before editing code.
-- `create_draft`, `read_draft`, `edit_draft`: save versioned drafts, inspect them,
-  and apply exact local edits against the current revision. Every edit runs static
-  validation; syntax failures include the operator, line, column and source excerpt.
-- `execute_pipeline(draft_id, revision)`: run a validated draft against the current image in the existing
-  sandbox, apply user constraints, and return an experiment ID, factual
-  statistics, intermediate artifacts and the rendered overlay.
-- `compare_candidates`: compare two or three scoped experiment IDs using an
-  aligned overlay sheet and added/removed pixel counts. These counts are not
-  accuracy scores; comparison never accepts or publishes an algorithm.
-- `submit_experiment(experiment_id, reason)`: load the actual executed algorithm
-  from backend storage. Final model output no longer repeats Python source in a
-  large JSON document. Submission requires matching input, task/feedback scope,
-  code hash and runtime; it does not imply visual acceptance.
+- `create_draft`, `edit_draft`: persist and validate source; no automatic execution.
+  The first `create_draft` also contains `understanding` in its arguments.
+- `execute_pipeline`: run an explicitly named draft/revision and return an experiment ID.
+- `query_operators`, `load_skill`, `read_draft`, `inspect_experiment`,
+  `inspect_artifact`: retrieve exact definitions, source, reports and images.
+- `compare_candidates`: compare two or three compatible executed experiments.
+- `submit_experiment`: submit an actual experiment ID to independent review.
+  Earlier successful experiments from the same run may be submitted.
+- `needs_input` is a separate action for essential missing user information.
 
-Each planning request defaults to three definition queries, eight draft edits,
-six validation/execution requests, two actual executions and two comparisons.
-Static failures and unavailable Docker do not spend execution budget; runtime
-algorithm failures do. Identical pipelines, versions, scopes and runtimes can reuse
-results within the request. Docker and the sandbox image are checked before planning;
-infrastructure failures stop the session, and cleanup failures preserve the original cause.
-Artifacts live under `<output_root>/agent_experiments/<session_id>/`: `task.json`,
-`drafts/<draft_id>/revision_<n>.json`, `execution_<n>/`, `session.json`, and
-`submission.json` (or `failure.json`). Drafts and execution snapshots stay separate.
-Submitted pipelines still pass through formal execution, independent visual review,
-and human acceptance. Exploration budgets are
-additional to the existing candidate budgets, not a unified global limit.
+The controller saves and validates drafts before execution. Invalid source remains
+available with exact diagnostics for repair. Read results are accumulated and
+deduplicated. Operator definitions and Skill text remain available across proposal,
+execution and review. Exploration evidence remains available during edits;
+independent review starts from submitted artifacts and static definitions.
+A failed patch retains its evidence for repair.
+Repeating the same request without a state change stops the loop. Every model
+follow-up consumes the shared call allowance.
+Requests are rebuilt from canonical state, including the exact current draft,
+experiment identities, rejected results, review issues and remaining budget.
+Oversized essential context fails before transmission instead of silently
+discarding requirements or source. Images and report pages remain bounded.
+
+Only the first draft of a new user run may contain source-backed
+`contract_updates` and `memory_updates`. The program validates the quoted user
+instruction and then freezes the contract for automatic revisions. Later model
+actions cannot lower acceptance requirements. Docker availability is checked
+before the first model request, and infrastructure failures retain their cause.
 
 
 ## Planning protocol and implementation boundaries
 
-`ALIYUN_TOOL_MODE=native` (default) uses function schemas, streamed tool-call
-arguments and `role=tool` replies linked by call ID. For endpoints that do not
-support this protocol, explicitly set `ALIYUN_TOOL_MODE=text`; this compatibility
-mode uses the same schemas, dispatcher and budgets. There is no silent fallback.
-Live provider compatibility is not established by the mock protocol tests.
+- `core/agent_workflow.py`: explicit Agent/tool/submission/review graph nodes.
+- `core/agent_protocol.py`: tool action validation and Agent instructions.
+- `core/orchestration.py`: shared durable action execution, contract handling and
+  version-one controller/effect compatibility.
+- `core/orchestration_runtime.py`: persisted global limits, deadlines, action
+  receipts and task locks.
+- `providers/vision.py`: one cancellable JSON request per production action,
+  schema validation and fresh evidence context. No native mutation tools are sent.
+- `core/tools/contracts.py`: shared schemas for bounded read arguments and draft edits.
+- `core/experiments/runner.py`: shared execution, user constraints, quality facts
+  and rendering; `drafts.py` persists versioned source and validation diagnostics.
 
-- `core/planning.py`: bounded planning state machine (24 model turns for algorithm
-  development, reserving the last two for ID submission; 10 by default for other
-  sessions). `LIANGCE_PLANNING_TIMEOUT_SECONDS` defaults to 900 and also respects
-  a shorter enclosing request deadline. `LIANGCE_MAX_DRAFT_EDITS` defaults to 8.
-  Exhausted tool categories are disabled; full
-  exhaustion or repeated requests for unavailable tools triggers finalization.
-- `core/tools/contracts.py`: `ToolSpec` input schemas and `ToolResult` envelope
-  (`call_id`, `status`, `data`, `error`). Errors contain `code`, `message`, and
-  `retryable`, with structured `details` for diagnostics; dispatch also returns
-  remaining `budget` and `available_tools`.
-- `core/tools/budget.py`: request-scoped counters enforced by dispatch and the
-  execution/comparison entry points. Invalid known calls consume interaction
-  budget, failed experiments consume execution budget, rejected calls do not
-  execute. JSON/final-output validation is separate from budget errors.
-- `core/experiments/runner.py`: shared single-candidate execution, constraints,
-  quality facts and rendering. Neither the tools nor Runner import agent_loop
-  or providers. The workflow still owns selection, calibration and acceptance.
-
-Error codes include `invalid_arguments`, `unknown_tool`, `budget_exhausted`,
-`pipeline_invalid`, `timeout`, `resource_limit`, `worker_terminated`,
-`execution_failed`, `artifact_missing`, and `io_error`. A dead worker without an
-error payload is not assumed to have exceeded memory. Finalization rejects tools
-with `finalization_required`; malformed final JSON uses `invalid_json` and invalid
-candidate content uses `invalid_final_output`.
+The production graph reuses existing draft, execution, inspection and comparison
+implementations without constructing the legacy planning session.
+`core/planning.py` and its separate budgets remain for legacy callers.
+`ALIYUN_TOOL_MODE=native|text`,
+`LIANGCE_PLANNING_TIMEOUT_SECONDS` and `LIANGCE_MAX_DRAFT_EDITS` configure that
+legacy path, not production action calls. Mock tests do not establish live
+endpoint compatibility or image accuracy.
 
 Skills use progressive disclosure:
 
@@ -407,17 +434,16 @@ is used. Duplicate name/version pairs cannot replace built-ins. Accepted legacy
 `skill_*/skill.json` templates remain a compatibility format: `load_skill` reads
 them through `get()`, validates their schema and dependencies, and returns their
 template and operator contracts. New Skills use Markdown workflow guidance.
-Each body/resource load consumes one of the three discovery calls per planning
-request. For Markdown Skills, operator contracts are queried separately with
+Each body/resource load is a bounded read action in the production controller;
+legacy planning retains its discovery counter. Operator contracts are queried separately with
 `query_operators`, which accepts up to 30 names per call.
 The periodic segmentation fallback is an internal CV baseline, not a business Skill.
 
-Historical algorithm retrieval remains a deterministic workflow step in
-`core/agent_graph.py`; `search_algorithms` is not an exposed Agent Tool. Whole-task
-budgets across planning, revision and calibration, provider prompt/normalization
-extraction, and executable Skill-specific verification policies remain follow-up
-work; Skill checklists (and legacy `verification` metadata) do not imply these
-policies are all automatically enforced.
+Historical algorithm retrieval is deterministic: production performs it in
+`prepare`, while the legacy graph retains its retrieval node.
+`search_algorithms` is not an exposed Agent Tool.
+Skill checklists and legacy `verification` metadata do not imply that every
+domain-specific verification rule is automatically enforced.
 
 
 ## Runtime logs / 调试日志

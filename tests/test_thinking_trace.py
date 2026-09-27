@@ -48,6 +48,46 @@ def test_stream_without_reasoning_emits_no_synthetic_thinking():
         unregister_event_listener(events.append)
 
     assert not [e for e in events if e.get("type") == "thinking"]
+    assert not [e for e in events if e.get("type") == "thinking_delta"]
+
+
+def test_reasoning_chunks_stream_as_live_thinking_deltas():
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "先观察背景亮度。"}}]},
+        {"choices": [{"delta": {"reasoning_content": "再选择亮极性阈值。"}}]},
+        {"choices": [{"delta": {"content": "{\"task_summary\": \"提取亮目标\"}"}}]},
+    ]
+    provider = AliyunVisionProvider(api_key="test")
+    events = _listening()
+    try:
+        content = provider._complete_streaming(_streaming_client(chunks), [])
+    finally:
+        unregister_event_listener(events.append)
+
+    assert content == '{"task_summary": "提取亮目标"}'
+    deltas = [e for e in events if e.get("type") == "thinking_delta"]
+    assert [e["content"] for e in deltas] == ["先观察背景亮度。", "再选择亮极性阈值。"]
+    # 完整思考事件仍按原样发出，且在所有增量之后，供时间线收敛与回放。
+    final = [e for e in events if e.get("type") == "thinking"]
+    assert final and events.index(deltas[-1]) < events.index(final[0])
+    assert any("先观察背景亮度。" in str(e.get("message")) for e in final)
+
+
+def test_reasoning_delta_stream_is_capped_at_display_limit():
+    from providers.vision import REASONING_DISPLAY_LIMIT
+    piece = "思" * 1000
+    chunks = [{"choices": [{"delta": {"reasoning_content": piece}}]} for _ in range(6)]
+    provider = AliyunVisionProvider(api_key="test")
+    events = _listening()
+    try:
+        provider._complete_streaming(_streaming_client(chunks), [])
+    finally:
+        unregister_event_listener(events.append)
+
+    deltas = [e for e in events if e.get("type") == "thinking_delta"]
+    assert sum(len(e["content"]) for e in deltas) == REASONING_DISPLAY_LIMIT
+    final = next(e for e in events if e.get("type") == "thinking")
+    assert len(final["message"]) == REASONING_DISPLAY_LIMIT + len("…（截断）")
 
 
 def test_understanding_summary_lines_render_task_and_candidates():

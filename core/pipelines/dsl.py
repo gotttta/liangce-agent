@@ -459,7 +459,14 @@ def _validate_v3_pipeline(pipeline, registry, generated_specs):
     if not isinstance(declared_inputs, dict):
         raise ValueError("input_types must be a mapping")
     for name, kind in declared_inputs.items():
-        if not isinstance(name, str) or not name.startswith("$") or name == "$image" or kind not in ARTIFACT_TYPES:
+        if name == "$image":
+            raise ValueError(
+                "$image is the built-in primary image (2D grayscale in the agent workflow), "
+                "not an external input. Remove only input_types['$image']; keep node inputs "
+                "referencing $image unchanged. Omit input_types or use {} when no additional "
+                "inputs are needed. $rgb is a separate RGB input, not a replacement for this fix."
+            )
+        if not isinstance(name, str) or not name.startswith("$") or kind not in ARTIFACT_TYPES:
             raise ValueError("invalid external input declaration")
         artifact_types[name] = ARTIFACT_TYPES[kind]
     visiting = set()

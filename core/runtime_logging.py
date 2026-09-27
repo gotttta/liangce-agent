@@ -113,7 +113,8 @@ def logged_operation(stage):
 
 def log_event(event):
     event_type = event.get("type", "event")
-    if event_type == "llm_chunk":
+    if event_type in {"llm_chunk", "thinking_delta"}:
+        # 流式增量只是 UI 噪音，逐 token 落日志会把运行日志刷爆。
         return
     if event.get("node"):
         bind_context(stage=event["node"])

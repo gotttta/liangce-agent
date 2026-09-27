@@ -2,8 +2,11 @@ import json
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
+
+from core.experiments.drafts import atomic_json
 
 
 def utc_now():
@@ -17,16 +20,36 @@ class AlgorithmRegistry:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def publish(self, task_id, state, note="用户确认当前结果"):
+    def publish(self, task_id, state, note="用户确认当前结果", *, publication_id=None):
         strategy = state.get("strategy") if isinstance(state.get("strategy"), dict) else {}
         observation = (
             strategy.get("visual_observation")
             if isinstance(strategy.get("visual_observation"), dict)
             else {}
         )
-        algorithm_id = f"algorithm_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}"
+        if publication_id is not None:
+            if not isinstance(publication_id, str) or not publication_id.strip():
+                raise ValueError('publication_id must be a non-empty string')
+            algorithm_id = 'algorithm_' + sha256(publication_id.encode()).hexdigest()[:32]
+        else:
+            algorithm_id = f"algorithm_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}"
         algorithm_dir = self.root / algorithm_id
-        algorithm_dir.mkdir(parents=True, exist_ok=False)
+        algorithm_dir.mkdir(parents=True, exist_ok=publication_id is not None)
+        path = algorithm_dir / "algorithm.json"
+        if publication_id is not None and path.is_file():
+            try:
+                existing = json.loads(path.read_text(encoding='utf-8'))
+            except (ValueError, UnicodeError):
+                existing = None
+            if isinstance(existing, dict):
+                if 'source_task_id' in existing and existing['source_task_id'] != task_id:
+                    raise ValueError('publication_id already belongs to a different source_task_id')
+                if 'id' in existing and existing['id'] != algorithm_id:
+                    raise ValueError('publication_id does not match the stored algorithm ID')
+                if existing.get('status') == 'accepted' and 'pipeline' in existing:
+                    if existing.get('source_task_id') != task_id or existing.get('id') != algorithm_id:
+                        raise ValueError('completed publication has no matching task and algorithm identity')
+                    return {**existing, 'path': str(path)}
         manual_constraints = _manual_constraints(state)
         payload = {
             "schema_version": 2,
@@ -58,7 +81,6 @@ class AlgorithmRegistry:
                 "predicted_mask_path": state.get("predicted_mask_path"),
             },
         }
-        path = algorithm_dir / "algorithm.json"
         self._write_json(path, payload)
         return {**payload, "path": str(path)}
 
@@ -153,12 +175,7 @@ class AlgorithmRegistry:
 
     @staticmethod
     def _write_json(path, value):
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        atomic_json(path, json.loads(json.dumps(value, default=str)))
 
 
 def _manual_constraints(state):

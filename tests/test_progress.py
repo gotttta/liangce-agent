@@ -86,6 +86,45 @@ def test_llm_response_completes_request_row_and_stream_noise_is_dropped():
     assert events[0]["status"] == "completed"
 
 
+def test_controller_stage_rows_render_narration_in_the_activity_tree():
+    events = []
+    merge_progress_event(events, {"type": "node_start", "node": "propose", "description": "生成或修改一个算法版本"})
+    merge_progress_event(events, {"type": "llm_request", "provider": "Aliyun", "model": "m", "message_count": 2})
+    merge_progress_event(events, {"type": "llm_response", "provider": "Aliyun"})
+    merge_progress_event(events, {"type": "node_complete", "node": "propose", "duration": 27.33,
+                                   "metadata": {"status": "ok", "narration": "首轮方案：亮极性阈值捕获目标"}})
+
+    assert events[0]["status"] == "completed"
+    assert events[0]["detail"] == "首轮方案：亮极性阈值捕获目标"
+    assert events[0]["duration_seconds"] == 27.33
+    card = format_progress_card(events, running=False)
+    assert "生成或修改一个算法版本" in card
+    assert "首轮方案：亮极性阈值捕获目标" in card
+
+
+def test_controller_stage_failure_row_shows_error_and_keeps_previous_rows():
+    events = []
+    merge_progress_event(events, {"type": "node_start", "node": "review", "description": "独立复查实验"})
+    merge_progress_event(events, {"type": "node_start", "node": "propose", "description": "生成或修改一个算法版本"})
+    merge_progress_event(events, {"type": "node_complete", "node": "propose", "duration": 103.7,
+                                   "metadata": {"status": "error", "error": "finish_reason=length"}})
+
+    assert events[0]["status"] == "running"
+    assert events[1]["status"] == "failed"
+    assert events[1]["detail"] == "失败：finish_reason=length"
+    card = format_progress_card(events, running=False)
+    assert "icon-error" in card
+
+
+def test_repeated_controller_phases_keep_separate_narration_rows():
+    events = []
+    for narration in ("第一版方案", "第二版方案"):
+        merge_progress_event(events, {"type": "node_start", "node": "propose", "description": "生成或修改一个算法版本"})
+        merge_progress_event(events, {"type": "node_complete", "node": "propose", "duration": 1.0,
+                                       "metadata": {"status": "ok", "narration": narration}})
+    assert [item["detail"] for item in events if item.get("node") == "propose"] == ["第一版方案", "第二版方案"]
+
+
 def test_progress_card_keeps_only_current_group_open_while_running():
     events = [
         {"type": "group", "stage": "a1", "label": "识别方法 1", "name": "accepted::bright_x", "status": "running"},
@@ -138,6 +177,48 @@ def test_thinking_groups_break_at_other_events():
     ]
     card = format_progress_card(events, running=False)
     assert card.count('class="thinking-group is-') == 2
+
+
+def test_thinking_deltas_accumulate_into_streaming_row_until_final_event():
+    events = []
+    merge_progress_event(events, {"type": "llm_request", "provider": "Aliyun", "model": "m", "message_count": 1})
+    merge_progress_event(events, {"type": "thinking_delta", "content": "先看背景亮度", "context": "model_reasoning"})
+    merge_progress_event(events, {"type": "thinking_delta", "content": "，再选择亮阈值", "context": "model_reasoning"})
+
+    assert len(events) == 2
+    assert events[1]["type"] == "thinking"
+    assert events[1]["streaming"] is True
+    assert events[1]["message"] == "先看背景亮度，再选择亮阈值"
+
+    # 完整思考事件到达时原地收敛流式行，不追加重复行。
+    merge_progress_event(events, {
+        "type": "thinking", "message": "先看背景亮度，再选择亮阈值。",
+        "context": "model_reasoning", "timestamp": 12.0,
+    })
+    assert len(events) == 2
+    assert events[1].get("streaming") is None
+    assert events[1]["message"] == "先看背景亮度，再选择亮阈值。"
+
+
+def test_streaming_thinking_renders_live_tail_then_final_fold():
+    events = [
+        {"type": "thinking", "streaming": True,
+         "message": "甲" * 300 + "最新这段思考", "context": "model_reasoning", "timestamp": 10.0},
+    ]
+    live = format_progress_card(events, running=True)
+    assert '<details open class="thinking-group is-running">' in live
+    assert "thinking-live-text" in live
+    assert "思考中" in live
+    assert "最新这段思考" in live
+
+    finished_events = events + [{
+        "type": "thinking", "message": "完整思考内容",
+        "context": "model_reasoning", "timestamp": 12.0,
+    }]
+    finished = format_progress_card(finished_events, running=False)
+    assert "thinking-live-text" not in finished
+    assert '<details class="thinking-group is-completed">' in finished
+    assert "完整思考内容" in finished
 
 
 def test_stale_running_rows_flip_to_completed_and_only_latest_pulses():

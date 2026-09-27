@@ -47,8 +47,10 @@ def write_outputs(execution, directory, filename='outputs.json'):
 
 
 def write_manifest(directory, image_path, rendering, invalidated=()):
+    from core.experiments.drafts import atomic_json
     directory = Path(directory)
-    files = ('mask.png', 'outputs.json', 'contours.json', 'measurements.json', 'result_annotation.png', 'result_annotated.png')
+    files = ('mask.png', 'outputs.json', 'contours.json', 'measurements.json', 'result_annotation.png',
+             'result_annotated.png', 'pipeline.json', 'quality_report.json', 'operator_trace.json')
     records = {name: {'path': name, 'sha256': sha256((directory / name).read_bytes()).hexdigest()}
                for name in files if (directory / name).is_file()}
     revision = sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
@@ -58,5 +60,23 @@ def write_manifest(directory, image_path, rendering, invalidated=()):
                'stages': {'raw': {'outputs': 'raw_outputs.json'},
                           'constrained': {'mask': 'mask.png' if 'mask.png' in records else None},
                           'final': {'revision': revision, 'files': list(records)}}}
-    (directory / 'delivery_manifest.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    atomic_json(directory / 'delivery_manifest.json', payload)
+    return payload
+
+
+def verify_manifest(directory, input_sha256):
+    """Verify all committed delivery files before recovering an execution."""
+    directory = Path(directory)
+    payload = json.loads((directory / 'delivery_manifest.json').read_text(encoding='utf-8'))
+    files = payload['files']
+    required = {'outputs.json', 'contours.json', 'measurements.json', 'pipeline.json', 'quality_report.json'}
+    if (payload.get('input_sha256') != input_sha256 or not required.issubset(files)
+            or not {'result_annotation.png', 'result_annotated.png'}.intersection(files)
+            or payload.get('revision') != sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()):
+        raise ValueError('Delivery manifest identity or required artifacts do not match')
+    for name, record in files.items():
+        if name != Path(name).name or record['path'] != name:
+            raise ValueError('Delivery artifact path is outside this experiment')
+        if sha256((directory / name).read_bytes()).hexdigest() != record['sha256']:
+            raise ValueError('Delivery artifact integrity check failed')
     return payload

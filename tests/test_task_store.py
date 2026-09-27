@@ -37,7 +37,7 @@ def test_task_store_persists_samples_messages_and_node_runs(tmp_path):
 
     task_dir = tmp_path / "tasks" / task["id"]
     assert Path(sample["path"]).read_bytes() == b"image"
-    assert json.loads((task_dir / "task.json").read_text())["current_node"] == "understand_task"
+    assert json.loads((task_dir / "task.json").read_text())["current_node"] is None
     assert json.loads((task_dir / "nodes" / "understand_task" / "latest.json").read_text()) == record
     assert "find defect" in (task_dir / "conversation.jsonl").read_text()
     assert "node_finished" in (task_dir / "events.jsonl").read_text()

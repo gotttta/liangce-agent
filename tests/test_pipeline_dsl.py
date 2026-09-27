@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -226,6 +227,50 @@ def test_v3_dag_rejects_type_mismatch_and_cycles():
     }
     with pytest.raises(ValueError, match="contains a cycle"):
         validate_pipeline(cyclic)
+
+
+def test_builtin_image_declaration_error_repairs_without_changing_grayscale_input(tmp_path):
+    from core.experiments.drafts import DraftStore
+    pipeline = {
+        'schema_version': 3,
+        'input_types': {'$image': 'ImageArtifact'},
+        'nodes': [{'id': 'mask', 'operator': 'global_threshold',
+                   'inputs': {'image': '$image'}, 'params': {'polarity': 'bright', 'sensitivity': 1}}],
+        'outputs': {'mask': 'mask'},
+    }
+    original = deepcopy(pipeline)
+    draft = DraftStore(tmp_path).create(pipeline)
+    assert not draft['validation']['valid']
+    diagnostic = draft['validation']['error']['message']
+    assert "Remove only input_types['$image']" in diagnostic
+    assert 'keep node inputs referencing $image unchanged' in diagnostic
+    assert '$rgb is a separate RGB input' in diagnostic
+    assert pipeline == original
+
+    repaired = deepcopy(pipeline)
+    repaired.pop('input_types')
+    validate_pipeline(repaired)
+    gray = np.zeros((8, 8), dtype=np.float32)
+    gray[2:6, 2:6] = 255
+    result = execute_pipeline(gray, repaired)
+    assert result.mask.data.shape == gray.shape
+    assert result.mask.data[3, 3]
+    assert result.trace[0]['inputs'] == {'image': '$image'}
+    assert repaired['nodes'] == original['nodes']
+
+
+def test_declared_rgb_remains_separate_from_builtin_primary_image():
+    pipeline = {'schema_version': 3, 'input_types': {'$rgb': 'ImageArtifact'},
+                'nodes': [{'id': 'color', 'operator': 'normalize',
+                           'inputs': {'image': '$rgb'}, 'params': {}}],
+                'outputs': {'color_image': 'color'}}
+    gray = np.zeros((8, 8), dtype=np.float32)
+    rgb = np.zeros((8, 8, 3), dtype=np.float32)
+    rgb[:, :, 0] = 255
+    result = execute_pipeline(gray, pipeline, inputs={'$rgb': rgb})
+    assert result.artifacts['$image'].data.shape == (8, 8)
+    assert result.artifacts['$rgb'].data.shape == (8, 8, 3)
+    assert result.outputs['color_image'].data.shape == (8, 8, 3)
 
 
 def test_pipeline_replay_record_pins_operator_versions():

@@ -29,7 +29,7 @@ def test_explicit_deadline_remains_available(monkeypatch):
     monkeypatch.setenv('LIANGCE_REQUEST_TIMEOUT_SECONDS', '600')
     request = RequestControl.from_env()
     monkeypatch.setattr('core.request_control.time', SimpleNamespace(monotonic=lambda: request.started + 599))
-    assert request.remaining() == 1
+    assert request.remaining() == pytest.approx(1)
     monkeypatch.setattr('core.request_control.time', SimpleNamespace(monotonic=lambda: request.started + 600))
     with pytest.raises(RequestCancelled, match='超过总时限'):
         request.check()

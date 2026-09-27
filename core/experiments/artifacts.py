@@ -118,11 +118,15 @@ def experiment_scope(image_path, contract=None, context=None):
         path = context.get(key) or (context.get('human_feedback') or {}).get(key) or (context.get('feedback') or {}).get(key)
         masks[key] = digest(path)
     return {'input_sha256': digest(image_path), 'coordinate_version': 'stored-pixels-v1',
-            'contract': {key: contract.get(key) for key in (*FIELDS, 'unit')}, 'masks': masks}
+            'contract': {key: contract.get(key) for key in (*FIELDS, 'unit')}, 'masks': masks,
+            'references': [{'sha256': digest(item.get('image_path') or item.get('path')),
+                            'description': item.get('description', '')}
+                           for item in context.get('reference_examples', []) if isinstance(item, dict)]}
 
 
 def update_experiment(attempt, **changes):
     """Persist lifecycle updates without overwriting immutable execution evidence."""
+    from core.experiments.drafts import atomic_json
     directory = attempt.get('directory')
     path = Path(directory) / 'experiment.json' if directory else None
     # Older checkpoints and externally supplied attempts may predate manifests.
@@ -131,14 +135,13 @@ def update_experiment(attempt, **changes):
         return
     record = json.loads(path.read_text(encoding='utf-8'))
     record.update(to_jsonable(changes))
-    temporary = path.with_suffix('.json.tmp')
-    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    atomic_json(path, record)
     attempt.update(to_jsonable(changes))
 
 
 def record_experiments(attempts, image_path, previous_state, iteration, *, scope=None):
     """Write every attempt, including invalid and failed candidates, atomically."""
+    from core.experiments.drafts import atomic_json
     image_hash = sha256(Path(image_path).read_bytes()).hexdigest()
     for attempt in attempts:
         directory = Path(attempt['directory']).resolve()
@@ -163,6 +166,4 @@ def record_experiments(attempts, image_path, previous_state, iteration, *, scope
                       acceptance_status='pending',
                       execution_status='failed' if attempt['status'] in {'failed', 'duplicate_pipeline'} else 'completed')
         path = directory / 'experiment.json'
-        temporary = path.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding='utf-8')
-        temporary.replace(path)
+        atomic_json(path, to_jsonable(record))

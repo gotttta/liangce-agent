@@ -460,4 +460,5 @@ def _serialize_contours(contours):
 
 
 def _write_json(path, payload):
-    Path(path).write_text(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+    from core.experiments.drafts import atomic_json
+    atomic_json(path, to_jsonable(payload))

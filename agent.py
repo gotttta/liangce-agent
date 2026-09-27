@@ -32,6 +32,9 @@ def state_to_output(state):
         "measurement_type": state["strategy"]["measurement_type"],
         "unit": state["measurements"]["summary"]["unit"],
         "status": state["status"],
+        "run_status": state.get("run_status"),
+        "stop_reason": state.get("stop_reason"),
+        "budget": state.get("budget"),
         "results": state["measurements"]["results"],
         "summary": state["measurements"]["summary"],
         "segmentation": state.get("segmentation", {}),
@@ -82,4 +85,5 @@ def main():
     configure_logging()
     run_dir, output = run(parse_args())
     print(f"Output written to: {run_dir}")
+    print(f"Run status: {output['run_status']}; reason: {output['stop_reason'] or '-'}")
     print(json.dumps(output["summary"], indent=2, ensure_ascii=False))

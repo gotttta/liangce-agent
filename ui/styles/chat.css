@@ -401,6 +401,29 @@
   border-left: 1px solid var(--codex-border);
 }
 .thinking-item .activity-label { white-space: normal; }
+/* 流式思考：模型边想边滚动的实时文本框 */
+.thinking-live { align-items: flex-start; }
+.thinking-live .icon-thinking { line-height: 20px; }
+.thinking-live-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 9.6em;
+  overflow-y: auto;
+  color: var(--codex-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.thinking-caret {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--codex-faint);
+  animation: activity-pulse 1s ease-in-out infinite;
+}
 
 /* ---------- Result task card ---------- */
 .task-card {

@@ -42,11 +42,59 @@ def merge_progress_event(events, event):
     if event_type == "llm_chunk":
         # 分块输出只是流式噪音：请求行已经以脉冲状态展示，不落时间线。
         return
+    if event_type == "thinking_delta":
+        # 流式思考：增量追加到同一条思考行上，模型边想前端边滚动。
+        content = str(event.get("content") or "")
+        if not content:
+            return
+        last = events[-1] if events else None
+        if last is not None and last.get("type") == "thinking" and last.get("streaming"):
+            last["message"] = str(last.get("message") or "") + content
+            return
+        events.append({
+            "type": "thinking",
+            "streaming": True,
+            "message": content,
+            "context": event.get("context"),
+            "timestamp": event.get("timestamp"),
+        })
+        return
+    if event_type == "thinking" and event.get("context") == "model_reasoning":
+        # 完整思考事件到达时原地收敛流式行，避免同一份思考出现两行。
+        last = events[-1] if events else None
+        if last is not None and last.get("type") == "thinking" and last.get("streaming"):
+            events[-1] = dict(event)
+            return
+        events.append(dict(event))
+        return
     if event_type == "llm_response":
         # 响应让最近一条"请求 …"行原地完成，而不是另起一行。
         for index in range(len(events) - 1, -1, -1):
             if events[index].get("type") == "llm_request":
                 events[index] = {**events[index], "status": "completed"}
+                return
+        return
+    if event_type == "node_start":
+        # 控制器阶段行：节点自带的中文描述作为行标签，同名阶段可多次出现。
+        events.append({"label": str(event.get("description") or event.get("node") or "执行步骤"),
+                       "status": "running", "node": event.get("node")})
+        return
+    if event_type == "node_complete":
+        # 完成事件回填最近一条同名运行中的阶段行：状态、耗时和模型自己的叙述。
+        node = event.get("node")
+        metadata = event.get("metadata") or {}
+        failed = metadata.get("status") in {"error", "timeout", "cancelled", "unknown", "failed"}
+        detail = metadata.get("narration") or (f"失败：{metadata['error']}" if metadata.get("error") else None)
+        for index in range(len(events) - 1, -1, -1):
+            item = events[index]
+            if item.get("node") == node and item.get("status") == "running":
+                events[index] = {
+                    **item,
+                    "status": "failed" if failed else "completed",
+                    **({"detail": detail} if detail else {}),
+                    **({"duration_seconds": round(float(event["duration"]), 3)}
+                       if isinstance(event.get("duration"), (int, float)) else {}),
+                }
                 return
         return
     if event_type == "group" and event.get("name"):

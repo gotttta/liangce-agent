@@ -2,6 +2,10 @@
 from copy import deepcopy
 from hashlib import sha256
 import json
+import os
+from pathlib import Path
+import re
+import tempfile
 from uuid import uuid4
 
 from core.operators.generated import GeneratedSourceError
@@ -14,10 +18,25 @@ def content_hash(value):
 
 
 def atomic_json(path, value):
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         prefix=f'.{path.name}.', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def locate(value, pointer):
@@ -36,21 +55,56 @@ def locate(value, pointer):
 
 class DraftStore:
     def __init__(self, root):
-        self.root = root / 'drafts'
+        self.root = Path(root) / 'drafts'
         self.current = {}
 
     def get(self, draft_id, revision=None):
-        if draft_id not in self.current:
-            raise ToolError('unknown_draft', 'draft is outside this session', retryable=True)
-        draft = self.current[draft_id]
+        draft = self.load(draft_id)
         if revision is not None and revision != draft['revision']:
             raise ToolError('revision_conflict', 'draft version changed; read_draft before editing/executing',
                             retryable=True, details={'current_revision': draft['revision']})
         return deepcopy(draft)
 
-    def create(self, pipeline, **metadata):
-        return self._save({'draft_id': uuid4().hex, 'revision': 1,
-                           'pipeline': deepcopy(pipeline), **metadata})
+    def _directory(self, draft_id):
+        if not isinstance(draft_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', draft_id):
+            raise ToolError('unknown_draft', 'invalid draft ID', retryable=True)
+        directory = self.root / draft_id
+        if not directory.resolve().is_relative_to(self.root.resolve()):
+            raise ToolError('unknown_draft', 'draft is outside this store', retryable=True)
+        return directory
+
+    def load(self, draft_id, revision=None):
+        """Read a persisted snapshot; get() additionally guards edits against stale revisions."""
+        directory = self._directory(draft_id)
+        if revision is None:
+            revisions = [int(match.group(1)) for path in directory.glob('revision_*.json')
+                         if (match := re.fullmatch(r'revision_([1-9][0-9]*)\.json', path.name))]
+            if not revisions:
+                raise ToolError('unknown_draft', 'draft is outside this store', retryable=True)
+            revision = max(revisions)
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise ToolError('revision_conflict', 'invalid draft revision', retryable=True)
+        path = directory / f'revision_{revision}.json'
+        try:
+            draft = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError as exc:
+            raise ToolError('unknown_draft', 'draft revision does not exist in this store', retryable=True) from exc
+        if (draft.get('draft_id') != draft_id or draft.get('revision') != revision
+                or draft.get('source_hash') != content_hash(draft.get('pipeline'))):
+            raise ToolError('draft_modified', 'persisted draft identity or source hash changed')
+        self.current[draft_id] = deepcopy(draft)
+        return deepcopy(draft)
+
+    def create(self, pipeline, draft_id=None, **metadata):
+        draft_id = uuid4().hex if draft_id is None else draft_id
+        directory = self._directory(draft_id)
+        if (directory / 'revision_1.json').exists():
+            existing = self.load(draft_id, 1)
+            if existing['pipeline'] != pipeline or any(existing.get(key) != value for key, value in metadata.items()):
+                raise ToolError('draft_conflict', 'draft ID already belongs to another creation')
+            return self.summary(existing)
+        return self._save({**metadata, 'draft_id': draft_id, 'revision': 1,
+                           'pipeline': deepcopy(pipeline)})
 
     def edit(self, args):
         draft = self.get(args['draft_id'], args['base_revision'])

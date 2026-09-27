@@ -63,6 +63,9 @@ def format_task_card(state: dict) -> str:
 
 _GROUP_ICON = {"failed": "error", "warning": "dot", "skipped": "dot"}
 
+# 流式思考实时框只保留最近一段文本；完整内容仍以最终思考事件为准。
+_THINKING_STREAM_TAIL = 600
+
 
 def format_tokens(count) -> str:
     """Compact token count, e.g. 980 / 34.6K / 1.2M."""
@@ -340,12 +343,19 @@ def _thinking_group_html(section, running, last_running_id):
         status = "completed"
     rows = "".join(_thinking_item_html(item, running, last_running_id) for item in items)
     latest = str(items[-1].get("message") or "").strip()
-    preview = escape(latest[:48] + "…") if len(latest) > 48 else escape(latest)
+    # 流式思考的预览跟随最新内容（尾部），已完成的仍展示开头。
+    if items[-1].get("streaming") and len(latest) > 48:
+        preview = escape("…" + latest[-48:])
+    else:
+        preview = escape(latest[:48] + "…") if len(latest) > 48 else escape(latest)
     timestamps = [
         float(item["timestamp"]) for item in items if isinstance(item.get("timestamp"), (int, float))
     ]
     total = timestamps[-1] - timestamps[0] if len(timestamps) >= 2 else 0.0
-    meta = f"{total:.1f}s" if total > 0.05 else f"{len(items)} 条"
+    if running and items[-1].get("streaming"):
+        meta = "思考中"
+    else:
+        meta = f"{total:.1f}s" if total > 0.05 else f"{len(items)} 条"
     header = (
         '<div class="thinking-head">'
         '<span class="group-caret" aria-hidden="true"></span>'
@@ -366,6 +376,15 @@ def _thinking_group_html(section, running, last_running_id):
 def _thinking_item_html(item, running, last_running_id):
     status = _effective_status(item, running, last_running_id)
     message = str(item.get("message") or "").strip() or "正在分析任务"
+    if item.get("streaming") and running and status == "running":
+        # 流式思考：只展示最新的一段（渲染重置滚动位置，尾部才是“正在想”的内容）。
+        tail = message[-_THINKING_STREAM_TAIL:]
+        return (
+            f'<div class="activity-row activity-{escape(status)} thinking-item thinking-live">'
+            f'<span class="activity-icon icon-thinking" aria-hidden="true"></span>'
+            f'<div class="thinking-live-text">{escape(tail)}'
+            f'<span class="thinking-caret" aria-hidden="true"></span></div></div>'
+        )
     return (
         f'<div class="activity-row activity-{escape(status)} thinking-item">'
         f'<span class="activity-icon icon-dot" aria-hidden="true"></span>'

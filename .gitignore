@@ -7,17 +7,11 @@ venv/
 env/
 
 outputs/
-workspace/tasks/
-workspace/algorithms/
+workspace/
 
 .DS_Store
 .env
 .env.*
 
-workspace/logs/
-
-workspace/*.sqlite3*
-
-workspace/context_archives/
 tmp/
 .zcode/

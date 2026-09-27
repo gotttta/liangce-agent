@@ -42,6 +42,13 @@ _TASK_STATUS_LABELS = {
     "in_progress": "进行中",
     "waiting_for_acceptance": "待确认",
     "waiting_for_feedback": "待反馈",
+    "running": "进行中",
+    "awaiting_feedback": "待反馈",
+    "completed": "已完成",
+    "stopped": "已停止",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "interrupted": "已中断",
     "accepted": "已验收",
     "exited": "已结束",
 }
@@ -478,12 +485,18 @@ def resume_chat_task(task_id):
     has_user_message = any(item.get("role") == "user" for item in messages)
     attachment = sample.get("path") if sample and not has_user_message else None
     attachment_label = f"已恢复：`{sample['source_name']}`" if attachment else ""
+    show_artifacts = bool(state and state.get("annotated_image_path")
+                          and Path(state["annotated_image_path"]).is_file())
+    accepted = task.get("status") == "accepted" or (state or {}).get("agent_status") == "accepted"
+    acceptance = store.load_acceptance(task_id, state) if accepted and show_artifacts else None
+    acceptance_complete = bool(acceptance and task.get("accepted_at") == acceptance["accepted_at"])
     show_actions = bool(
-        state
-        and state.get("annotated_image_path")
-        and task.get("status") not in {"accepted", "exited"}
+        show_artifacts
+        and task.get("status") != "exited"
+        and state.get("agent_status") != "exited"
+        and not acceptance_complete
+        and state.get("run_status") != "running"
     )
-    show_artifacts = bool(state and state.get("annotated_image_path"))
     if state:
         # Historical messages contain rendered HTML; rebuild only the latest
         # execution snapshot from its authoritative state, without rewriting disk.
@@ -492,6 +505,7 @@ def resume_chat_task(task_id):
             if is_progress_message(messages[index]):
                 messages[index] = {**messages[index], "content": _format_agent_process(_state_process_events(display_state))}
                 break
+        messages = _restore_result_messages(messages, display_state)
     if not messages:
         messages = [{
             "role": "assistant",
@@ -532,18 +546,6 @@ def load_latest_chat_task():
     if resumable:
         return resume_chat_task(resumable["id"])
     return reset_chat_task()
-
-
-def _task_memory_context(store, task_id):
-    try:
-        return store.memory_service.snapshot(task_id)
-    except (OSError, ValueError, TypeError, FileNotFoundError):
-        return {}
-
-
-def _save_task_memory(store, task_id, message, understanding, state, previous_state):
-    return store.memory_service.record_result(
-        task_id, message, understanding, state, previous_state)
 
 
 def store_chat_attachment(path, task):
@@ -691,8 +693,11 @@ def _format_understanding(
     retrieved_algorithms=None,
 ):
     """Summarize the goal without asking the user to design the CV pipeline."""
+    provider_label = provider_name
+    if duration_seconds is not None:
+        provider_label += f"，{duration_seconds:.1f}s"
     lines = [
-        f"视觉理解已完成（{provider_name}，{duration_seconds:.1f}s）。",
+        f"视觉理解已完成（{provider_label}）。",
         f"\n\n**我理解的任务**：{understanding.get('task_summary') or understanding.get('target_defect') or '按描述标注目标'}",
         "\n\n我会自动选择识别方法，再把标注结果展示给你。你只需要看结果对不对。",
     ]
@@ -713,6 +718,12 @@ def _state_process_events(state):
     for event in state.get("trajectory") or []:
         node = event.get("node")
         label = {
+            "prepare": "校验输入和执行环境",
+            "propose": "生成或修改一个算法版本",
+            "read": "读取所需证据",
+            "draft": "保存并校验草稿",
+            "execute": "执行并保存实验",
+            "review": "独立复查实验",
             "prepare_inputs": "准备输入",
             "understand_task": "视觉理解",
             "retrieve_algorithms": "查找相似经验",
@@ -750,6 +761,9 @@ def _state_process_events(state):
 def _trajectory_progress_detail(event):
     node = event.get("node")
     details = event.get("details") or {}
+    narration = details.get("narration")
+    if isinstance(narration, str) and narration.strip():
+        return narration
     if node == "resume_after_human":
         action = str(details.get("action") or "")
         action_label = {
@@ -904,24 +918,43 @@ def _inline_result_messages(state):
     return messages
 
 
+def _restore_result_messages(messages, state):
+    """Recover the latest result when a run finished without persisting UI messages."""
+    messages = list(messages or [])
+    annotated = (state or {}).get("annotated_image_path")
+    if not annotated or not Path(annotated).is_file() or state.get("run_status") == "running":
+        return messages
+    for message in messages:
+        content = message.get("content")
+        path = None
+        if message.get("role") == "assistant":
+            if isinstance(content, (list, tuple)) and content:
+                path = content[0]
+            elif isinstance(content, dict):
+                file = content.get("file")
+                path = content.get("path") or (file.get("path") if isinstance(file, dict) else None)
+        if isinstance(path, (str, Path)) and Path(path).resolve() == Path(annotated).resolve():
+            return messages
+    for message in state_to_chat_messages(state):
+        if message.get("role") == "assistant" and message not in messages:
+            messages.append(message)
+    reason = (state.get("decision") or {}).get("reason")
+    if reason and not any(isinstance(item.get("content"), str) and reason in item["content"] for item in messages):
+        messages.append({"role": "assistant", "content": reason})
+    messages.extend(_inline_result_messages(state))
+    return messages
+
+
 def _recover_agent_state(task, previous_state):
-    if isinstance(previous_state, dict) and previous_state.get("annotated_image_path"):
+    if isinstance(previous_state, dict) and (
+            previous_state.get("annotated_image_path") or previous_state.get("run_id")
+            or previous_state.get("graph_thread_id")):
         return previous_state
     if not isinstance(task, dict) or not task.get("id"):
         return previous_state
 
-    latest_path = TASK_ROOT / task["id"] / "nodes" / "execute_candidate" / "latest.json"
-    if not latest_path.exists():
-        return previous_state
     try:
-        record = json.loads(latest_path.read_text(encoding="utf-8"))
-        outputs = record.get("outputs") if isinstance(record.get("outputs"), dict) else {}
-        annotated = outputs.get("annotated_image_path")
-        if annotated:
-            graph_state_path = Path(annotated).parent / "graph_state.json"
-            if graph_state_path.exists():
-                return json.loads(graph_state_path.read_text(encoding="utf-8"))
-        return outputs or previous_state
+        return TaskStore(TASK_ROOT).load_latest_state(task["id"]) or previous_state
     except (OSError, ValueError, TypeError):
         return previous_state
 
@@ -970,6 +1003,21 @@ _COVERED_PROGRESS_NODES = {
     "plan_candidates",
 }
 
+# 控制器的六个动作阶段：进度行由合并层配对，保留中文描述、模型叙述和多次出现。
+_CONTROLLER_PHASE_NODES = {"prepare", "propose", "read", "draft", "execute", "review"}
+
+
+def _controller_node_progress_event(event):
+    """控制器阶段事件以原始形状透传，标签、叙述和重复阶段由合并层处理。"""
+    if event.get("type") not in {"node_start", "node_complete"}:
+        return None
+    if event.get("node") not in _CONTROLLER_PHASE_NODES:
+        return None
+    if event["type"] == "node_start":
+        return {"type": "node_start", "node": event["node"], "description": event.get("description")}
+    return {"type": "node_complete", "node": event["node"], "duration": event.get("duration"),
+            "metadata": event.get("metadata") or {}}
+
 
 def _format_node_metadata(metadata) -> str:
     if not isinstance(metadata, dict):
@@ -998,6 +1046,9 @@ _ATTEMPT_SUBSTEP_CONTEXTS = {
 }
 _ATTEMPT_CLOSING_CONTEXTS = {"all_failed", "select_best", "save_final_results"}
 
+# 流式思考增量的转发批量：攒够这个字符数才进进度队列，避免逐 token 打满队列。
+THINKING_FLUSH_CHARS = 120
+
 
 @logged_operation("run_chat_agent")
 def run_chat_agent(
@@ -1025,10 +1076,38 @@ def run_chat_agent(
     # 每个候选尝试一个分组（ZCode 式工具树）：execute_candidate 标记开新组，
     # 组内随后产生的子步骤/工具调用都挂到该组下。
     attempt_state = {"count": 0, "current": None}
+    # 流式思考增量先在监听线程内攒批，任何其他事件到达时冲刷，保持时间线顺序。
+    thinking_buffer = {"context": None, "chars": [], "total": 0}
+
+    def flush_thinking_delta():
+        if not thinking_buffer["chars"]:
+            return
+        report({
+            "type": "thinking_delta",
+            "content": "".join(thinking_buffer["chars"]),
+            "context": thinking_buffer["context"],
+            "timestamp": time.time(),
+        })
+        thinking_buffer["chars"] = []
+        thinking_buffer["total"] = 0
 
     def agent_event_listener(event):
         """捕获 Agent 内部事件并转换为进度报告"""
         event_type = event.get("type")
+        if event_type == "thinking_delta":
+            content = str(event.get("content") or "")
+            if content:
+                thinking_buffer["chars"].append(content)
+                thinking_buffer["total"] += len(content)
+                thinking_buffer["context"] = event.get("context") or thinking_buffer["context"]
+                if thinking_buffer["total"] >= THINKING_FLUSH_CHARS:
+                    flush_thinking_delta()
+            return
+        flush_thinking_delta()
+        controller_event = _controller_node_progress_event(event)
+        if controller_event is not None:
+            report(controller_event)
+            return
         if event_type == "node_start":
             node = event.get("node")
             if node in _COVERED_PROGRESS_NODES:
@@ -1167,6 +1246,8 @@ def run_chat_agent(
         previous_state = _recover_agent_state(current, previous_state)
         previous_state, memory_context = store.memory_service.prepare(
             task_id, message, image_path, previous_state, history)
+        current = store.load_task(task_id)
+        ground_truth = current.get("ground_truth") or {}
         from core.input_contract import input_identity
         previous_state = {**(previous_state or {}), **input_identity(image_path), "target_image_path": str(image_path)}
         task_memory = memory_context["task_memory"]
@@ -1205,154 +1286,60 @@ def run_chat_agent(
                 (str(submitted_attachment_path), Path(submitted_attachment_path).name),
             )
         store.append_message(task_id, "user", message)
-        understanding_started = time.monotonic()
-        report(_progress_event("understand_task", "视觉理解", "正在分析图片并确定需要标注的区域。"))
+        execution_started = time.monotonic()
+        report(_progress_event("execute_candidates", "识别目标", "正在分析图片并标出目标。"))
         provider_name = "Qwen"
         try:
             provider = build_runtime_provider()
-            provider_name = f"Qwen ({provider.model})"
-            provider_context = {
-                **memory_context,
-                "original_task_goal": original_task_goal,
-                "conversation": memory_context["conversation"],
-                "task_memory": task_memory,
-                "previous_strategy": (previous_state or {}).get("strategy"),
-                "previous_pipeline": (previous_state or {}).get("pipeline"),
-                "previous_measurements": (previous_state or {}).get("measurements", {}).get("summary"),
-                "previous_quality": (previous_state or {}).get("quality_report"),
-                "previous_result_image_path": (previous_state or {}).get("annotated_image_path"),
-                "previous_mask_path": (previous_state or {}).get("predicted_mask_path"),
-                "feedback_image_path": (previous_state or {}).get("feedback_image_path"),
-                "feedback_layer_path": (previous_state or {}).get("feedback_layer_path"),
-                "feedback_pixel_count": (previous_state or {}).get("feedback_pixel_count"),
-                "human_feedback": (previous_state or {}).get("human_feedback", {}),
-                "reference_examples": reference_examples,
-                "ground_truth": ground_truth,
-                "ground_truth_mask_path": ground_truth.get("mask_path"),
-                "task_contract": (previous_state or {}).get("task_contract"),
-                "selected_experiment_id": (previous_state or {}).get("selected_experiment_id"),
-                "review": (previous_state or {}).get("review"),
-            }
-            from core.experiments.lifecycle import revision_evidence
-            provider_context['execution_feedback'] = {'attempts': revision_evidence({
-                **(previous_state or {}), **provider_context, 'target_image_path': image_path,
-            })}
-            store.memory_service.context_manifest(task_id, provider_context)
-            try:
-                understanding = provider.understand_task(
-                    image_path,
-                    message,
-                    previous_context=provider_context,
-                    reference_examples=reference_examples,
-                )
-            except TypeError as exc:
-                if "reference_examples" not in str(exc):
-                    raise
-                understanding = provider.understand_task(
-                    image_path,
-                    message,
-                    previous_context=provider_context,
-                )
+            provider_name = f"Qwen ({getattr(provider, 'model', 'runtime')})"
         except Exception as exc:
-            understanding_duration = time.monotonic() - understanding_started
-            logger.exception("Visual understanding failed")
+            duration = time.monotonic() - execution_started
+            logger.exception("Provider initialization failed")
             error_message = f"任务规划失败：{type(exc).__name__}: {exc}"
             report(_progress_event(
-                "understand_task", "视觉理解", error_message, "failed", understanding_duration,
+                "execute_candidates", "识别目标", error_message, "failed", duration,
             ))
             store.save_node_result(
                 task_id,
                 "understand_task",
                 {"image_path": image_path, "description": message, "provider": "qwen"},
                 {},
-                understanding_duration,
+                duration,
                 status="failed",
                 error=error_message,
             )
             store.append_message(task_id, "assistant", error_message)
             raise gr.Error(error_message) from exc
-        task_memory = store.memory_service.apply_updates(
-            task_id, message, understanding, memory_context["memory_source_id"])
-        memory_context = {**provider_context, "task_memory": task_memory}
-        understanding_duration = time.monotonic() - understanding_started
-        report(_progress_event(
-            "understand_task", "视觉理解", f"已生成任务理解（{provider_name}）。", "completed", understanding_duration,
-        ))
-        retrieved_algorithms = []
-        if not (previous_state or {}).get("pipeline"):
-            report(_progress_event("retrieve_algorithms", "查找相似经验", "正在查找以前处理过的相似图片。"))
-            retrieved_algorithms = store.search_algorithms(
-                understanding,
-                limit=2,
-                min_score=0.2,
-            )
-            store.append_event(task_id, "algorithm_search_completed", {
-                "match_count": len(retrieved_algorithms),
-                "matches": [
-                    {
-                        "algorithm_id": item.get("algorithm_id"),
-                        "name": item.get("name"),
-                        "score": item.get("score"),
-                        "match_reasons": item.get("match_reasons", []),
-                        "source_task_id": item.get("source_task_id"),
-                    }
-                    for item in retrieved_algorithms
-                ],
-            })
-            report(_progress_event(
-                "retrieve_algorithms", "查找相似经验", f"找到了 {len(retrieved_algorithms)} 个相似记录。", "completed",
-            ))
-        else:
-            report(_progress_event("retrieve_algorithms", "查找相似经验", "这次会参考上一轮的结果。", "completed"))
-        store.save_node_result(
-            task_id,
-            "understand_task",
-            {"image_path": image_path, "description": message},
-            understanding,
-            understanding_duration,
-        )
-        understanding_message = _format_understanding(
-            understanding,
-            provider_name,
-            understanding_duration,
-            retrieved_algorithms=retrieved_algorithms,
-        )
-        if not _task_memory_context(store, task_id).get("task_goal"):
-            current = store.set_title(
-                task_id,
-                understanding.get("task_summary") or message,
-            )
-        store.append_message(task_id, "assistant", understanding_message)
-
-        execution_started = time.monotonic()
-        report(_progress_event("plan_candidates", "准备识别方法", "正在选择适合这张图片的识别方法。"))
-        report(_progress_event("execute_candidates", "识别目标", "正在查找并标出目标。"))
-        selected_strategy = understanding["recommended_strategy"]
+        memory_context = {**memory_context, "original_task_goal": original_task_goal}
         state = run_agent_graph(
             target_image_path=image_path,
             description=message,
-            understanding=understanding,
             output_root=ROOT / "outputs",
             unit="pixel",
             max_candidates=1,
             previous_state=previous_state,
-            retrieved_algorithms=retrieved_algorithms,
             reference_examples=reference_examples,
             ground_truth_mask_path=ground_truth.get("mask_path"),
             ground_truth_annotation_path=ground_truth.get("annotation_path"),
             algorithm_registry=store.algorithm_registry,
             provider=provider,
             memory_context=memory_context,
-        )
-        state["memory_summary"] = _save_task_memory(
-            store,
-            task_id,
-            message,
-            understanding,
-            state,
-            previous_state,
+            task_store=store,
+            task_id=task_id,
         )
         execution_duration = time.monotonic() - execution_started
+        understanding = state.get("understanding") or {}
+        understanding_message = None
+        if understanding:
+            understanding_duration = next((event.get("duration_seconds")
+                for event in state.get("trajectory") or [] if event.get("node") == "understand_task"), None)
+            understanding_message = _format_understanding(
+                understanding, provider_name, understanding_duration,
+                retrieved_algorithms=state.get("retrieved_algorithms") or [],
+            )
+            if not task_memory.get("task_goal"):
+                current = store.set_title(task_id, understanding.get("task_summary") or message)
+            store.append_message(task_id, "assistant", understanding_message)
         trajectory = state.get("trajectory") or []
         for event in trajectory:
             if event.get("node") in {"plan_candidates", "execute_candidates", "decide_next_action"}:
@@ -1375,7 +1362,7 @@ def run_chat_agent(
             {
                 "candidate": "qwen_recommended_strategy",
                 "provider": provider_name,
-                "strategy": selected_strategy,
+                "strategy": state.get("strategy") or understanding.get("recommended_strategy"),
                 "selected_pipeline": state.get("pipeline"),
                 "candidate_attempts": state.get("candidate_attempts"),
                 "retrieved_algorithms": state.get("retrieved_algorithms"),
@@ -1395,15 +1382,32 @@ def run_chat_agent(
                 "trajectory": state.get("trajectory"),
                 "evaluation_report": state.get("evaluation_report"),
                 "ground_truth_mask_path": state.get("ground_truth_mask_path"),
+                "run_status": state.get("run_status"),
+                "stop_reason": state.get("stop_reason"),
             },
             execution_duration,
         )
         messages = list(history or [])
         messages.extend(_user_submission_messages(message, submitted_attachment_path))
-        messages.append({"role": "assistant", "content": understanding_message})
+        if understanding_message:
+            messages.append({"role": "assistant", "content": understanding_message})
         result_messages = state_to_chat_messages(state)
+        run_status = state.get("run_status")
+        stopped = run_status in {"stopped", "failed", "cancelled", "interrupted"}
+        if not result_messages or result_messages[-1].get("role") != "assistant":
+            result_messages.append({
+                "role": "assistant",
+                "content": _TASK_STATUS_LABELS.get(run_status, "本次运行已结束") + "。",
+            })
+        has_result = bool(state.get("annotated_image_path"))
         # 空结果（未检出目标）不能按"验收成功结果"的话术引导用户。
-        if state.get("selected_candidate"):
+        if stopped:
+            result_messages[-1]["content"] += f"\n\n本次运行用时 {execution_duration:.1f}s。"
+            if has_result:
+                result_messages[-1]["content"] += "已有结果已保留，本轮未完成验收。"
+            else:
+                result_messages[-1]["content"] += "本轮尚未生成可用结果。"
+        elif state.get("selected_candidate"):
             result_messages[-1]["content"] += (
                 f"\n\n本次识别用时 {execution_duration:.1f}s。"
                 "我把标注结果作为下一条图片消息发给你。请只看结果是否符合你的描述："
@@ -1419,7 +1423,8 @@ def run_chat_agent(
             result_messages[-1]["content"] += (
                 f"\n\n系统根据上一次结果自动调整了识别方法，共修改了 {len(pipeline_changes)} 处。"
             )
-        result_messages[-1]["content"] += "\n\n" + format_task_card(state)
+        if not stopped:
+            result_messages[-1]["content"] += "\n\n" + format_task_card(state)
         inline_messages = _inline_result_messages(state)
         messages.extend(result_messages)
         messages.extend(inline_messages)
@@ -1436,14 +1441,15 @@ def run_chat_agent(
             current,
             "",
             "",
-            gr.update(visible=True),
+            gr.update(visible=has_result),
             gr.update(visible=True),
             gr.update(value=None),
             gr.update(value=None),
-            gr.update(visible=True),
+            gr.update(visible=has_result),
         )
 
     finally:
+        flush_thinking_delta()
         unregister_event_listener(agent_event_listener)
 
 
@@ -1561,25 +1567,19 @@ def run_chat_agent_stream(
     def worker():
         token = control.set(request_control)
         try:
-            try:
-                result_holder["value"] = run_chat_agent(
-                    image_path,
-                    message,
-                    history,
-                    task,
-                    previous_state,
-                    editor_value,
-                    green_editor_value=green_editor_value,
-                    reference_example_paths=reference_example_paths,
-                    ground_truth_annotation_path=ground_truth_annotation_path,
-                    progress_callback=report,
-                )
-            except TypeError as exc:
-                if "unexpected keyword argument" not in str(exc):
-                    raise
-                result_holder["value"] = run_chat_agent(
-                    image_path, message, history, task, previous_state, editor_value,
-                )
+            from inspect import Parameter, signature
+            keywords = {
+                "green_editor_value": green_editor_value,
+                "reference_example_paths": reference_example_paths,
+                "ground_truth_annotation_path": ground_truth_annotation_path,
+                "progress_callback": report,
+            }
+            parameters = signature(run_chat_agent).parameters
+            if not any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                keywords = {key: value for key, value in keywords.items() if key in parameters}
+            result_holder["value"] = run_chat_agent(
+                image_path, message, history, task, previous_state, editor_value, **keywords,
+            )
         except (Exception, RequestCancelled) as exc:
             result_holder["error"] = RuntimeError(str(exc)) if isinstance(exc, RequestCancelled) else exc
         finally:
@@ -1653,10 +1653,22 @@ def run_chat_agent_stream(
         failed_messages.append({
                 "role": "assistant",
                 "content": f"{process_message(False)}\n\n{detail}",
-            })
+        })
         if isinstance(task, dict) and task.get("id"):
-            store = TaskStore(TASK_ROOT)
-            store.append_message(task["id"], "assistant", detail)
+            store = None
+            try:
+                store = TaskStore(TASK_ROOT)
+                task = store.load_task(task["id"])
+                previous_state = store.load_latest_state(task["id"]) or previous_state
+            except (OSError, ValueError, TypeError):
+                logger.warning("Could not refresh task after run failure", exc_info=True)
+            if store is not None:
+                try:
+                    store.append_message(task["id"], "assistant", detail)
+                except (OSError, ValueError, TypeError):
+                    logger.warning("Could not save failure message", exc_info=True)
+        has_previous_result = bool((previous_state or {}).get("annotated_image_path"))
+        show_result_actions = has_previous_result and (previous_state or {}).get("run_status") != "running"
         yield (
             failed_messages,
             gr.update(
@@ -1673,7 +1685,7 @@ def run_chat_agent_stream(
             task,
             "",
             "",
-            gr.update(visible=has_previous_result),
+            gr.update(visible=show_result_actions),
             gr.update(visible=True),
             gr.update(value=editor_value),
             gr.update(value=green_editor_value),
@@ -1739,6 +1751,67 @@ def submit_canvas_feedback(
 
 
 def handle_result_action(action, image_path, history, task, previous_state, feedback_text=""):
+    if action not in {"accept", "exit"} or not isinstance(task, dict) or not task.get("id"):
+        return _handle_result_action(action, image_path, history, task, previous_state, feedback_text)
+    from core.orchestration_runtime import TaskBusyError, task_lock
+    try:
+        with task_lock(TASK_ROOT, task["id"]):
+            store = TaskStore(TASK_ROOT)
+            current = store.load_task(task["id"])
+            if current.get("run_status") == "running":
+                raise gr.Error("任务仍在运行，请等待本次运行结束后再操作。")
+            state = _recover_agent_state(current, previous_state)
+            displayed_run = (state or {}).get("run_id") or (state or {}).get("graph_thread_id")
+            if current.get("latest_run_id") and displayed_run != current["latest_run_id"]:
+                raise gr.Error("当前页面显示的是较早的结果，请重新打开任务后再操作。")
+            if (state or {}).get("task_id") not in (None, task["id"]):
+                raise gr.Error("当前结果不属于此任务，请重新打开任务后再操作。")
+            latest = store.load_latest_state(task["id"])
+            if latest:
+                state = latest
+            terminal_status = (state or {}).get("agent_status")
+            if terminal_status not in {"accepted", "exited"}:
+                terminal_status = current.get("status")
+            completed_action = {"accepted": "accept", "exited": "exit"}.get(terminal_status)
+            if completed_action:
+                if action != completed_action:
+                    raise gr.Error("当前结果已验收或已结束，不能执行相反操作。请重新打开任务查看最新状态。")
+                state = {**(state or {}), "agent_status": terminal_status}
+                acceptance = store.load_acceptance(task["id"], state) if action == "accept" else None
+                side_effects_complete = (
+                    bool(acceptance and current.get("accepted_at") == acceptance["accepted_at"])
+                    if action == "accept" else current.get("exit_note") is not None
+                )
+                if side_effects_complete:
+                    return _completed_result_action_response(store, current, state, history)
+            return _handle_result_action(action, image_path, history, current, state, feedback_text)
+    except TaskBusyError as exc:
+        raise gr.Error("任务仍在运行，请等待本次运行结束后再操作。") from exc
+
+
+def _completed_result_action_response(store, task, state, history):
+    messages = _restore_result_messages(store.load_messages(task["id"]) or history, state)
+    show_artifacts = bool(state.get("agent_status") != "exited" and task.get("status") != "exited"
+                          and state.get("annotated_image_path") and Path(state["annotated_image_path"]).is_file())
+    return (
+        messages,
+        gr.update(value=state.get("annotated_image_path"), visible=False),
+        gr.update(value=state.get("predicted_mask_path"), visible=False),
+        gr.update(visible=False),
+        measurement_rows(state),
+        state,
+        task,
+        gr.update(value=""),
+        "",
+        gr.update(visible=False),
+        gr.update(visible=True),
+        gr.update(value=None),
+        gr.update(value=None),
+        gr.update(visible=show_artifacts),
+    )
+
+
+def _handle_result_action(action, image_path, history, task, previous_state, feedback_text=""):
     previous_state = _recover_agent_state(task, previous_state)
     artifact_prompts = {
         "result": "查看结果图",
@@ -1758,11 +1831,17 @@ def handle_result_action(action, image_path, history, task, previous_state, feed
     if not isinstance(task, dict) or not task.get("id"):
         task = store.create_task()
     updated_state = dict(previous_state or {})
-    if action != "continue":
+    terminal_action = {"accepted": "accept", "exited": "exit"}.get(updated_state.get("agent_status"))
+    if terminal_action and action != terminal_action:
+        raise gr.Error("当前结果已验收或已结束，不能执行相反操作。请重新打开任务查看最新状态。")
+    if not terminal_action and action != "continue" and (action != "accept" or updated_state.get("annotated_image_path")):
         _resume_human_review(
             store, task["id"], updated_state, action,
             rejection_reason=feedback_text if action == "exit" else None,
         )
+        completed_action = {"accepted": "accept", "exited": "exit"}.get(updated_state.get("agent_status"))
+        if completed_action and action != completed_action:
+            raise gr.Error("当前结果已验收或已结束，不能执行相反操作。请重新打开任务查看最新状态。")
     if action == "accept":
         if not updated_state.get("annotated_image_path"):
             failed_messages = list(history or [])
@@ -1851,13 +1930,24 @@ def handle_result_action(action, image_path, history, task, previous_state, feed
 
 
 def _resume_human_review(store, task_id, state, action, **response_fields):
-    thread_id = state.get("graph_thread_id")
-    if not thread_id or not state.get("interrupt"):
+    thread_id = state.get("graph_thread_id") or state.get("run_id")
+    if not thread_id or not (state.get("interrupt") or state.get("run_id")
+                            or state.get("run_status") == "awaiting_feedback"):
         return state
     try:
         response = {"action": action, **{key: value for key, value in response_fields.items() if value}}
         resumed = resume_agent_graph(thread_id, response)
     except Exception as exc:
+        from core.orchestration_runtime import TaskBusyError
+        if isinstance(exc, TaskBusyError):
+            raise
+        missing_legacy_checkpoint = (
+            not state.get("run_id") and not state.get("orchestration_version")
+            and (isinstance(exc, FileNotFoundError)
+                 or (isinstance(exc, ValueError) and "未找到持久化工作流检查点" in str(exc)))
+        )
+        if not missing_legacy_checkpoint:
+            raise gr.Error("无法保存本次结果操作，请重新打开任务后重试。") from exc
         # Legacy file-backed results remain usable if a checkpoint is missing
         # (for example, a task created before SQLite checkpoint migration).
         store.append_event(task_id, "human_review_resume_unavailable", {
@@ -1873,6 +1963,8 @@ def _resume_human_review(store, task_id, state, action, **response_fields):
         "trajectory": resumed.get("trajectory", state.get("trajectory", [])),
         "interrupt": resumed.get("interrupt", []),
     })
+    state.update({key: resumed[key] for key in ("run_status", "stop_reason", "budget", "state_version")
+                  if key in resumed})
     store.append_event(task_id, "human_review_resumed", {
         "thread_id": thread_id,
         "action": action,

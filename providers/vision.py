@@ -1,13 +1,16 @@
 from hashlib import sha256
 from core.runtime_logging import logged_operation
+import asyncio
 import base64
+from copy import deepcopy
 import json
+import math
 import os
 import re
 from pathlib import Path
 
 from agent_types import normalize_strategy
-from core.agent_events import emit_llm_chunk, emit_llm_request, emit_llm_response, emit_thinking
+from core.agent_events import emit_llm_chunk, emit_llm_request, emit_llm_response, emit_thinking, emit_thinking_delta
 from core.experiments.context import candidate_for_model
 from core.model_context import check_request_budget
 
@@ -40,6 +43,17 @@ MODEL_CONTEXT_WINDOWS = {
 }
 # Per-image token estimate for the fallback counter (API usage unavailable).
 IMAGE_TOKEN_ESTIMATE = 1024
+ACTION_READ_TOOLS = (
+    "query_operators", "load_skill", "inspect_experiment", "inspect_artifact", "read_draft",
+)
+ACTION_CONTEXT_FIELDS = (
+    "task_contract", "current_draft", "latest_experiment", "experiment_summaries",
+    "review", "read_results", "last_error", "budget", "task_memory", "current_goal",
+    "original_task_goal", "conversation_memory", "procedural_memory", "human_feedback",
+    "previous_result_image_path", "feedback_image_path", "reference_masks",
+    "allow_contract_updates", "remaining_seconds",
+    "last_tool_result", "draft_catalog", "submitted_experiment_id",
+)
 
 
 def context_window_for_model(model):
@@ -308,9 +322,116 @@ class AliyunVisionProvider:
         self.model = model or os.getenv("ALIYUN_VISION_MODEL", DEFAULT_ALIYUN_VISION_MODEL)
         self.context_window = context_window_for_model(self.model)
         self.timeout_seconds = int(timeout_seconds or NODE_TIMEOUT_SECONDS)
+        self.action_timeout_seconds = float(timeout_seconds if timeout_seconds is not None else
+                                            os.getenv("LIANGCE_MODEL_CALL_TIMEOUT_SECONDS", "").strip() or 120)
+        if not math.isfinite(self.action_timeout_seconds) or self.action_timeout_seconds <= 0:
+            raise ValueError("Action timeout must be finite and positive")
         self.max_retries = int(NODE_MAX_RETRIES if max_retries is None else max_retries)
         if not self.api_key:
             raise ValueError("Missing ALIYUN_API_KEY or DASHSCOPE_API_KEY")
+
+    @logged_operation("propose_action")
+    def propose_action(self, target_image_path, description, context=None, reference_examples=None):
+        messages = build_action_messages(
+            target_image_path, description, context=context, reference_examples=reference_examples,
+        )
+        raw = extract_json_object(self._complete_action(messages))
+        return normalize_model_action(raw, description=description, context=context)
+
+    @logged_operation("agent_decision")
+    def agent_action(self, target_image_path, description, context=None, reference_examples=None):
+        from core.agent_protocol import build_agent_messages, normalize_agent_action
+        messages = build_agent_messages(target_image_path, description, context=context,
+                                        reference_examples=reference_examples)
+        return normalize_agent_action(extract_json_object(self._complete_action(messages)),
+                                      description=description, context=context)
+
+    @logged_operation("review_action")
+    def review_action(self, target_image_path, description, candidates,
+                      acceptance_criteria=None, context=None, reference_examples=None):
+        messages = build_action_messages(
+            target_image_path, description, context=context, reference_examples=reference_examples,
+            candidates=candidates, acceptance_criteria=acceptance_criteria,
+        )
+        raw = extract_json_object(self._complete_action(messages))
+        names = {str(item.get("name")) for item in candidates
+                 if item.get("status") in {"completed", "selected_for_review"}}
+        return normalize_model_action(raw, description=description, context=context,
+                                      candidate_names=names)
+
+    @logged_operation("action_model_request")
+    def _complete_action(self, messages):
+        """One cancellable request; orchestration owns all retries and follow-ups."""
+        from core.request_control import check_cancelled, control
+
+        check_cancelled()
+        check_request_budget(messages)
+        output_limit = int(os.getenv("LIANGCE_ACTION_MAX_OUTPUT_TOKENS", "8192"))
+        if not 256 <= output_limit <= 16384:
+            raise ValueError("LIANGCE_ACTION_MAX_OUTPUT_TOKENS must be between 256 and 16384")
+        current = control.get()
+        deadline = min(self.action_timeout_seconds, current.remaining()) if current else self.action_timeout_seconds
+        if deadline <= 0:
+            raise ValueError("Action timeout must be positive")
+        emit_llm_request("Aliyun", self.model, len(messages), has_images=True)
+
+        async def complete():
+            from openai import AsyncOpenAI
+
+            async with AsyncOpenAI(api_key=self.api_key, base_url=self.base_url,
+                                   timeout=deadline, max_retries=0) as client:
+                async with asyncio.timeout(deadline):
+                    response = await client.chat.completions.create(
+                        model=self.model, messages=messages, temperature=0.1,
+                        stream=False,
+                        response_format={"type": "json_object"}, max_tokens=output_limit,
+                    )
+                    check_cancelled()
+                    choices = _field(response, "choices", [])
+                    if not choices:
+                        raise ValueError("Action model response contains no completion")
+                    message = _field(choices[0], "message", {})
+                    if _field(message, "tool_calls"):
+                        raise ValueError("Action model must return JSON, not native tool calls")
+                    content = _field(message, "content", "") or ""
+                    if not isinstance(content, str):
+                        raise ValueError("Action model content must be a JSON string")
+                    usage = _normalize_usage(_field(response, "usage"))
+                    emit_llm_response("Aliyun", "", usage=usage or _estimate_usage(messages, content),
+                                      model=self.model, context_window=self.context_window)
+                    reasoning = _field(message, "reasoning_content") or _field(message, "reasoning")
+                    if isinstance(reasoning, str) and reasoning.strip():
+                        emit_thinking(_clip_text(reasoning, REASONING_DISPLAY_LIMIT), "model_reasoning")
+                    finish_reason = _field(choices[0], "finish_reason")
+                    if finish_reason not in {None, "stop"}:
+                        raise ValueError(f"Action model response incomplete: finish_reason={finish_reason}")
+                    emit_llm_chunk(content, provider="Aliyun", model=self.model)
+                    return content
+
+        async def run():
+            async def watch_cancellation():
+                while True:
+                    check_cancelled()
+                    await asyncio.sleep(0.1)
+
+            request = asyncio.create_task(complete())
+            watcher = asyncio.create_task(watch_cancellation())
+            try:
+                done, _ = await asyncio.wait((request, watcher), return_when=asyncio.FIRST_COMPLETED)
+                if watcher in done:
+                    await watcher
+                return await request
+            finally:
+                for task in (request, watcher):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(request, watcher, return_exceptions=True)
+
+        try:
+            return asyncio.run(run())
+        except TimeoutError:
+            check_cancelled()
+            raise
 
     @logged_operation("summarize_conversation")
     def summarize_conversation(self, previous_summary, messages):
@@ -506,6 +627,8 @@ class AliyunVisionProvider:
 
         chunks = []
         reasoning_parts = []
+        # 实时思考增量与最终 thinking 事件共用同一显示预算，超限后不再逐段外发。
+        reasoning_emitted = 0
         tool_calls = {}
         stream_usage = None
         finish_reason = None
@@ -532,7 +655,12 @@ class AliyunVisionProvider:
                         function = _field(call, "function", {})
                         current["name"] += _field(function, "name", "") or ""
                         current["arguments"] += _field(function, "arguments", "") or ""
-                reasoning_parts.append(_stream_chunk_reasoning(chunk))
+                reasoning = _stream_chunk_reasoning(chunk)
+                if reasoning:
+                    if reasoning_emitted < REASONING_DISPLAY_LIMIT:
+                        emit_thinking_delta(reasoning, "model_reasoning")
+                        reasoning_emitted += len(reasoning)
+                    reasoning_parts.append(reasoning)
                 text = _stream_chunk_text(chunk)
                 if not text:
                     continue
@@ -800,6 +928,223 @@ def build_revision_context_text(previous_context):
             header += "\n（篇幅所限，靠前的候选只保留摘要；越靠后的候选越完整）"
         sections.append(header + "\n" + "\n\n".join(blocks))
     return "\n\n".join(sections)
+
+
+def normalize_model_action(raw, *, description, context=None, candidate_names=None):
+    """Validate model intent without executing tools or discarding invalid drafts."""
+    from core.tools.contracts import TOOL_SPECS
+
+    if not isinstance(raw, dict):
+        raise ValueError("Action must be a JSON object")
+    value = deepcopy(raw)
+    kind = value.get("kind")
+    if kind == "read":
+        if set(value) != {"kind", "requests"}:
+            raise ValueError("Read action requires only kind and requests")
+        requests = value["requests"]
+        if not isinstance(requests, list) or not 1 <= len(requests) <= 5:
+            raise ValueError("Read action requires 1 to 5 requests")
+        for request in requests:
+            if not isinstance(request, dict) or set(request) != {"tool", "arguments"}:
+                raise ValueError("Read request requires tool and arguments")
+            if request["tool"] not in ACTION_READ_TOOLS:
+                raise ValueError("Action requested a tool outside the read-only whitelist")
+            TOOL_SPECS[request["tool"]].validate(request["arguments"])
+        return value
+    if kind == "needs_input":
+        if set(value) != {"kind", "reason"} or not isinstance(value["reason"], str) or not value["reason"].strip():
+            raise ValueError("needs_input requires a non-empty reason")
+        return value
+    if candidate_names is not None:
+        if kind != "review" or set(value) != {"kind", "review"} or not isinstance(value["review"], dict):
+            raise ValueError("Review model must return review, read, or needs_input")
+        if value["review"].get("decision") not in {"present", "revise"}:
+            raise ValueError("Review decision must be present or revise")
+        review = normalize_candidate_review(value["review"], candidate_names)
+        if review["decision"] == "present" and review["observed_issues"]:
+            review.update(decision="revise", reason="复查仍记录了未解决的问题，不能判为通过。")
+        return {"kind": "review", "review": review}
+    update_fields = {"contract_updates", "memory_updates"} & value.keys()
+    if update_fields:
+        if (context or {}).get("allow_contract_updates") is not True:
+            raise ValueError("immutable_task_contract: updates are only allowed at the new user-run boundary")
+        for key in update_fields:
+            updates = value[key]
+            if not isinstance(updates, list) or len(updates) > 20:
+                raise ValueError(f"{key} must be a list of at most 20 source-backed updates")
+            for update in updates:
+                quote = update.get("source_quote") if isinstance(update, dict) else None
+                if not isinstance(quote, str) or not quote.strip() or quote not in str(description or ""):
+                    raise ValueError(f"{key} requires a source_quote from the current user's message")
+    if kind == "edit":
+        TOOL_SPECS["edit_draft"].validate({key: item for key, item in value.items()
+                                         if key not in {"kind", *update_fields}})
+        return value
+    if kind != "propose":
+        raise ValueError("Proposal model must return propose, edit, read, or needs_input")
+    if set(value) - {"kind", "understanding", "pipeline", "change_reason", "expected_change", *update_fields}:
+        raise ValueError("Proposal contains unsupported fields")
+    TOOL_SPECS["create_draft"].validate({
+        key: item for key, item in value.items() if key not in {"kind", "understanding", *update_fields}
+    })
+    if not value["pipeline"]:
+        raise ValueError("Proposal requires a complete pipeline")
+    if (context or {}).get("task_contract"):
+        if "understanding" in value:
+            raise ValueError("immutable_task_contract: revisions cannot replace understanding")
+    else:
+        understanding = value.get("understanding")
+        if not isinstance(understanding, dict):
+            raise ValueError("Initial proposal requires task understanding")
+        understanding.pop("candidate_pipelines", None)
+        understanding.setdefault("task_summary", description)
+        normalized = normalize_task_understanding(understanding, task_description=description)
+        value["understanding"] = normalized
+        constraints = normalized["target_constraints"]
+        _strip_observed_count_limits(value["pipeline"], constraints.get("observed_count"),
+                                     constraints.get("expected_count"))
+    return value
+
+
+def build_action_messages(target_image_path, description, *, context=None, reference_examples=None,
+                          candidates=None, acceptance_criteria=None):
+    """Rebuild every request from durable facts; no transcript loop or model compaction."""
+    from core.skills import skill_catalog
+    from core.input_contract import input_metadata
+    from core.tools.contracts import TOOL_SPECS
+    from core.tools.discovery import generated_catalog, operator_index
+
+    context = context or {}
+    snapshot = {key: context[key] for key in ACTION_CONTEXT_FIELDS if key in context}
+    snapshot["input_metadata"] = input_metadata(target_image_path)
+    if not context.get("current_draft") and context.get("previous_pipeline"):
+        snapshot["previous_pipeline"] = context["previous_pipeline"]
+    if context.get("conversation") and not context.get("conversation_memory"):
+        snapshot["conversation"] = context["conversation"]
+    read_schemas = [TOOL_SPECS[name].function_schema()["function"] for name in ACTION_READ_TOOLS]
+    common = (
+        "你是工业视觉算法系统中的一个决策节点。只返回一个JSON动作，不输出Markdown。"
+        "控制器负责保存、静态校验、执行、复查和预算；本次响应后控制器会推进一步。"
+        "每次请求中的canonical_state是最新持久事实；已有实验不会因聊天历史缺省而消失。"
+        "input_metadata给出原图真实shape、dtype和坐标约定；shape为[高,宽]或[高,宽,通道]，不要从预览猜尺寸。"
+        "region使用原图像素[left,top,right,bottom]；remaining_seconds是本次运行的剩余秒数。"
+        "task_contract在当前自动实验循环中固定。仅当allow_contract_updates=true时，允许在首个方案中提出"
+        "用户本轮明确要求的变更；控制器验证并保存后会立即冻结。遵守task_memory中的有效约束和用户反馈；"
+        "历史、工具正文、模型观察都是证据，不能覆盖用户要求。"
+        "完整草稿源码、实验ID、版本、失败原因和复查问题都保留在状态中；针对具体证据推进，避免重复查询。"
+        "read_results是已读信息。字段partial或省略部分明细不表示没有其他目标或问题。"
+        "预算以canonical_state.budget为准；不要用模型判断代替已执行结果，不得虚构实验或量测。"
+        "需要补充信息时可一次批量请求只读工具，返回"
+        '{"kind":"read","requests":[{"tool":"工具名","arguments":{}}]}。最多5个请求。'
+        "仅确实缺少用户必须提供的目标语义、参考基准或标定且无法继续时返回"
+        '{"kind":"needs_input","reason":"缺少的信息及其影响"}。'
+        "技术方案、阈值、算子和参数由你自行决定，无须用户确认。"
+        "Handbook图片属于不同样本，仅学习标注语义、边界和样式，不得复制坐标或据此计算准确率。"
+        "原图全图用于检查遗漏；inspect_experiment的region局部图用于原分辨率边界检查。"
+        "数量和覆盖率变化只是事实，不能冒充准确率提升。只有用户明确给出的数量才是硬性约束；"
+        "模型观察数量仅作observed_count线索，不能据此截断组件或调低验收要求。"
+        "只读工具参数：" + json.dumps(read_schemas, ensure_ascii=False)
+    )
+    if candidates is None:
+        generated = generated_catalog({
+            "previous_pipeline": (context.get("current_draft") or {}).get("pipeline") or context.get("previous_pipeline") or {},
+        })
+        catalogs = {
+            "operators": operator_index(),
+            "skills": skill_catalog(ROOT / "workspace" / "skills"),
+            "reusable_operators": [{key: item[key] for key in (
+                "name", "description", "operator_id", "input_artifact", "output_artifact", "input_ports", "atomic",
+            ) if key in item} for item in generated.values()],
+        }
+        instruction = (
+            "本次职责：根据图片和当前状态提出一个完整可执行的Pipeline，或对当前草稿做局部修改。"
+            "首次propose同时给出understanding，不需要先保存理解。task_contract已有内容时不得再返回understanding。"
+            "首次理解需说明目标、正常背景、输出形式和基于当前任务的可见验收条件；验收条件不包含算法参数。"
+            "把用户目标和不可变约束与模型假设区分开；未明确给出数量时覆盖全部可见目标，不要求恰好N个。"
+            "memory_updates仅记录本轮用户明确提出、修改或撤销的要求，source_quote逐字引用用户原文；"
+            "沿用constraint_records的key，ROI及坐标使用scope=image，一般语义使用scope=task；无更改返回空数组。"
+            "已有task_contract且allow_contract_updates=true时，可在propose或edit动作顶层返回contract_updates和memory_updates；"
+            "contract_updates每项为{field,value,source_quote}，field限task_summary、target_defect、normal_context、"
+            "output_requirements、acceptance_criteria、rendering、target_constraints，value为该字段完整的新值。"
+            "memory_updates每项为{op:set或revoke,key,value,source_quote,scope:task或image}。"
+            "更新仅来自用户本轮明确修改，不得根据算法失败、模型观察或历史消息降低条件。"
+            "allow_contract_updates不为true时不得返回顶层contract_updates或memory_updates字段。"
+            "修改应说明证据、原因和预期变化；结构仍适用时优先改相关步骤，连续无改善时可据证据换方法。"
+            "使用目录中的精确算子名。需要参数定义时query_operators可批量查询。匹配业务Skill时load_skill；"
+            "按Skill的量测定义实际计算，缺参考或标定时明确缺失，不得编造。"
+            "复用自定义算子前用完整operator_id查询源码，将完整定义原样纳入generated_operators。"
+            "目录无法组合实现时允许自定义算子，atomic可为false；源码定义apply(data, params)，np预置，"
+            "可导入numpy、cv2、scipy、skimage和PIL。代码在断网Docker沙箱中执行，不可安装依赖。"
+            "单输入data为数组；声明input_ports时data为按端口命名的字典，节点inputs连接各输入。"
+            "允许ImageArtifact、MaskArtifact、MetadataArtifact；MetadataArtifact返回JSON，可含boxes(xyxy)、points(xy)及量测。"
+            "多输入必须使用schema_version=3、nodes、operator、inputs及outputs；简单链路仍兼容steps。"
+            "v3 outputs将输出名映射到节点ID；非分割任务无需生成mask。"
+            "内建主图$image（兼容别名image）由工作流自动提供二维灰度数组，节点inputs直接引用$image；"
+            "不要在input_types声明$image。input_types仅声明额外输入，无额外输入时省略或设为{}。"
+            "若报$image声明错误，只删除input_types中的$image项，保留节点对$image的引用，不要改为$rgb。"
+            "仅在算法确实需要颜色信息时，在input_types声明$rgb:ImageArtifact并在节点inputs引用$rgb；"
+            "$rgb是原始RGB三通道数组，并非$image的替代别名。灰度阈值和分割链路继续使用$image；"
+            "若自定义颜色算法使用$rgb，必须明确处理通道并生成二维MaskArtifact。不得编造其他外部输入。"
+            "rendering单独设置annotation_mode、contour_color、contour_thickness、mask_alpha。"
+            "Pipeline格式示例："
+            '{"schema_version":3,"name":"candidate","nodes":[{"id":"mask","operator":"global_threshold",'
+            '"inputs":{"image":"$image"},"params":{}}],"outputs":{"mask":"mask"},"generated_operators":[]}。'
+            "新方案动作："
+            '{"kind":"propose","pipeline":{完整Pipeline},"change_reason":"依据和修改","expected_change":"预期及验证方法",'
+            '"understanding":{"task_summary":"目标","target_defect":"目标特征","normal_context":"正常结构",'
+            '"ambiguities":[],"questions":[],"output_requirements":["mask"],'
+            '"acceptance_criteria":{"task_goal":"目标","requested_output":["mask"],"visual_checks":["任务专属可见条件"],'
+            '"failure_examples":["任务专属失败现象"]},"target_constraints":{},"rendering":{},"memory_updates":[]}}。'
+            "局部修改动作："
+            '{"kind":"edit","draft_id":"当前ID","base_revision":1,"edits":[{"path":"JSON Pointer",'
+            '"old":"精确旧值或唯一匹配子串","new":"新值"}],"change_reason":"依据和修改","expected_change":"预期"}。'
+            "edit路径必须存在，base_revision必须是当前版本；冲突时先read_draft，不猜测覆盖。"
+            "可用目录：" + json.dumps(catalogs, ensure_ascii=False)
+        )
+    else:
+        instruction = (
+            "本次职责：独立复查指定实验。比较原图、标注叠加图和实际量测，逐条核对固定验收条件。"
+            "只有指定候选满足所有关键条件且证据充分时才能present；明显漏标、误标、边界或输出形式错误应revise。"
+            "即使只有一个候选也不能默认通过；运行成功、结果非空或数量合理不等于视觉正确，不输出分数。"
+            "证据不足先请求针对性读取；无法证明正确时不得判为通过。复查可以读取证据，不能修改或执行算法。"
+            "返回"
+            '{"kind":"review","review":{"decision":"present|revise","selected_candidate":"候选名或null",'
+            '"reason":"基于证据的理由","observed_issues":["具体问题"],"revision_plan":["可操作建议"]}}。'
+            "本任务验收条件：" + json.dumps(normalize_acceptance_criteria(
+                acceptance_criteria or context.get("task_contract"), task_summary=description,
+            ), ensure_ascii=False)
+        )
+    content = [{"type": "text", "text": "用户描述：" + str(description or "")},
+               {"type": "text", "text": "canonical_state:\n" + json.dumps(snapshot, ensure_ascii=False)},
+               {"type": "text", "text": "当前待处理原图："}, image_content(target_image_path, "当前待处理原图")]
+    for index, example in enumerate(normalize_reference_examples(reference_examples), start=1):
+        content.extend([{"type": "text", "text": f"Handbook示例 {index}：{example['description']}"},
+                        image_content(example["image_path"], f"Handbook示例 {index}")])
+    image_paths = set()
+
+    def add_evidence(path, label):
+        if path and str(path) not in image_paths and Path(path).is_file():
+            image_paths.add(str(path))
+            content.extend([{"type": "text", "text": label}, image_content(path, label)])
+
+    for key, label in (("previous_result_image_path", "上一轮结果"), ("feedback_image_path", "用户画布反馈：红色删除，绿色补充")):
+        add_evidence(context.get(key), label)
+    for key, label in (("include_mask_path", "用户必须包含区域"), ("exclude_mask_path", "用户必须排除区域")):
+        add_evidence((context.get("human_feedback") or {}).get(key), label)
+    for index, result in enumerate(context.get("read_results") or []):
+        for path in result.get("images") or []:
+            add_evidence(path, f"读取证据 {index + 1}：{result.get('tool', '')}")
+    latest_directory = (context.get("latest_experiment") or {}).get("directory")
+    if latest_directory:
+        add_evidence(Path(latest_directory) / "result_annotation.png", "最新已执行实验标注叠加图")
+        add_evidence(Path(latest_directory) / "mask.png", "最新已执行实验最终Mask")
+    for item in candidates or []:
+        if item.get("status") not in {"completed", "selected_for_review"}:
+            continue
+        content.append({"type": "text", "text": json.dumps(candidate_for_model(item), ensure_ascii=False)})
+        add_evidence(Path(item["directory"]) / "result_annotation.png" if item.get("directory") else None,
+                     f"候选 {item.get('name')} 标注叠加图")
+    return [{"role": "system", "content": common + instruction}, {"role": "user", "content": content}]
 
 
 def build_task_understanding_messages(

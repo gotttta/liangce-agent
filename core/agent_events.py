@@ -94,6 +94,18 @@ def emit_thinking(message: str, context: Optional[str] = None):
     })
 
 
+def emit_thinking_delta(content: str, context: Optional[str] = None):
+    """流式思考增量，供前端实时展示；仅面向 UI，不落统一运行日志。"""
+    if not content:
+        return
+    emit_event({
+        "type": "thinking_delta",
+        "content": content,
+        "context": context,
+        "timestamp": time.time(),
+    })
+
+
 def emit_tool_call(tool_name: str, args: Dict[str, Any]):
     """工具调用"""
     emit_event({

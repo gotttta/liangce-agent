@@ -338,15 +338,27 @@ class ExperimentTools:
         if any(item not in self.attempts for item in ids):
             raise ValueError('experiment is outside this session')
         self.budget.consume('comparison')
+        return self.compare_results(self.target, self.input_hash, self.attempts,
+                                    self.root / f'comparison_{self.comparisons}.png', args)
+
+    @staticmethod
+    def compare_results(target, input_hash, attempts, output_path, args):
+        """Deterministic comparison, with budgeting owned by the caller's run."""
+        ids = args.get('experiment_ids')
+        if (not isinstance(ids, list) or not 2 <= len(ids) <= 3
+                or not all(isinstance(item, str) for item in ids) or len(set(ids)) != len(ids)):
+            raise ValueError('provide 2 to 3 distinct experiment IDs')
+        if any(item not in attempts for item in ids):
+            raise ValueError('experiment is outside this session')
         masks, overlays, summaries = [], [], []
         comparison_scope = None
-        with Image.open(self.target) as source:
+        with Image.open(target) as source:
             shape = (source.height, source.width)
         for experiment_id in ids:
-            attempt = self.attempts[experiment_id]
+            attempt = attempts[experiment_id]
             directory = Path(attempt['directory'])
             record = json.loads((directory / 'experiment.json').read_text(encoding='utf-8'))
-            if record.get('input_sha256') != self.input_hash:
+            if record.get('input_sha256') != input_hash:
                 raise ValueError('cannot compare experiments from different input images')
             if comparison_scope is not None and record.get('scope') != comparison_scope:
                 raise ValueError('cannot compare experiments with different task or feedback constraints')
@@ -383,8 +395,8 @@ class ExperimentTools:
         for index, (preview, experiment_id) in enumerate(zip(overlays, ids)):
             sheet.paste(preview, (index * width, 32))
             draw.text((index * width + 5, 8), f'{index + 1}: {experiment_id}', fill='black')
-        self.root.mkdir(parents=True, exist_ok=True)
-        path = self.root / f'comparison_{self.comparisons}.png'
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         sheet.save(path)
         result = {'status': 'success', 'candidates': summaries, 'differences': differences,
                   'reason': args.get('reason') or 'Explicit comparison of selected experiment IDs',

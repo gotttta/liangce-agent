@@ -24,7 +24,7 @@ OPERATOR_METADATA = {
     "remove_small_objects": ("1.0.0", "移除小型孤立候选。", True),
     "statistical_threshold": ("1.0.0", "使用 Otsu、Yen、Li、Triangle 或均值阈值分割。", True),
     "unsharp_enhance": ("1.0.0", "增强边缘和局部纹理对比度。", True),
-    "exclude_regions": ("1.0.0", "生成排除边界、比例尺或指定矩形的有效区域 Mask。", True),
+    "exclude_regions": ("1.0.0", "生成排除边界、比例尺或指定矩形的有效区域 Mask。rectangles 每项为 [x, y, width, height]，单位为原图像素，不是 [x1, y1, x2, y2]；要求 x + width <= 图像宽度、y + height <= 图像高度。border_px 为排除边框厚度，保留贴边目标时设为 0。", True),
     "period_estimation": ("1.0.0", "估计重复结构的方向和周期。", True),
     "build_periodic_background": ("1.0.0", "根据图像和周期分析生成周期背景模型。", True),
     "subtract_periodic_background": ("1.0.0", "从原图减去周期背景，得到异常残差。", True),

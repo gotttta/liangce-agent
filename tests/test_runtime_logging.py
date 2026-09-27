@@ -91,6 +91,7 @@ def test_events_and_debug_arguments(log_path):
     from core.agent_events import emit_event
     emit_event({'type': 'tool_call', 'tool': 'example', 'args': {'api_key': 'dontwrite'}})
     emit_event({'type': 'llm_chunk', 'content': 'chunk should not appear'})
+    emit_event({'type': 'thinking_delta', 'content': '增量思考不应落运行日志'})
     assert 'tool_call' in log_path.read_text()
     assert 'tool_args' not in log_path.read_text()
     configure_logging(log_path.parent, level='DEBUG')
@@ -99,6 +100,7 @@ def test_events_and_debug_arguments(log_path):
     assert 'tool_args' in text and '"size": 7' in text
     assert 'dontwrite' not in text
     assert 'chunk should not appear' not in text
+    assert '增量思考不应落运行日志' not in text
 
 
 def test_request_size_log_contains_only_counts(log_path):

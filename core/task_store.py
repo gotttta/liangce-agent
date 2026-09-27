@@ -115,6 +115,12 @@ class TaskStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def load_latest_state(self, task_id):
+        task = self.load_task(task_id)
+        run_id = task.get("latest_run_id")
+        if run_id:
+            path = self.task_dir(task_id) / "runs" / run_id / "latest.json"
+            if path.is_file():
+                return json.loads(path.read_text(encoding="utf-8"))
         latest_path = self.task_dir(task_id) / "nodes" / "execute_candidate" / "latest.json"
         if not latest_path.exists():
             return None
@@ -126,6 +132,50 @@ class TaskStore:
             if graph_state.exists():
                 return json.loads(graph_state.read_text(encoding="utf-8"))
         return outputs or None
+
+    def save_run_state(self, task_id, state):
+        """Project a checkpointed run into task history; callers hold the task lock."""
+        run_id = state.get("run_id") or state.get("graph_thread_id")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id):
+            raise ValueError("Run state requires a valid run_id")
+        if state.get("task_id") not in (None, task_id):
+            raise ValueError("Run state belongs to another task")
+        status = state.get("run_status")
+        if status not in {"running", "awaiting_feedback", "completed", "stopped", "failed", "cancelled", "interrupted"}:
+            raise ValueError("Run state requires a valid run_status")
+        version = state.get("state_version", 0)
+        if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+            raise ValueError("Run state requires a non-negative state_version")
+        task = self.load_task(task_id)
+        current_id = task.get("latest_run_id")
+        started_at = state.get("run_started_at")
+        if current_id == run_id:
+            if version <= task.get("run_state_version", -1):
+                return task
+            started_at = started_at or task.get("run_started_at")
+        elif current_id:
+            # A delayed callback must not replace the current run's projection.
+            if not started_at or started_at <= task.get("run_started_at", ""):
+                return task
+        started_at = started_at or utc_now()
+        snapshot = {key: value for key, value in state.items()
+                    if key not in {"__interrupt__", "previous_state"}}
+        snapshot.update(run_id=run_id, task_id=task_id, run_started_at=started_at,
+                        state_version=version)
+        path = self.task_dir(task_id) / "runs" / run_id / "latest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json(path, snapshot)
+        task.update(latest_run_id=run_id, run_started_at=started_at,
+                    run_state_version=version, run_status=status,
+                    stop_reason=state.get("stop_reason"),
+                    current_node=state.get("phase"), updated_at=utc_now())
+        task["status"] = {
+            "running": "in_progress", "awaiting_feedback": "waiting_for_feedback",
+        }.get(status, status)
+        if state.get("agent_status") in {"accepted", "exited"}:
+            task["status"] = state["agent_status"]
+        self._write_json(self.task_dir(task_id) / "task.json", task)
+        return task
 
     def add_sample(self, task_id, source_path):
         source = Path(source_path)
@@ -275,11 +325,6 @@ class TaskStore:
         }
         self._write_json(node_dir / "latest.json", record)
         self._write_json(node_dir / f"run_{uuid4().hex[:8]}.json", record)
-        task = self.load_task(task_id)
-        task["current_node"] = node_name
-        task["status"] = "failed" if status == "failed" else "in_progress"
-        task["updated_at"] = utc_now()
-        self._write_json(task_dir / "task.json", task)
         self.append_event(task_id, "node_finished", record)
         logger.info("node_saved task_id=%s node=%s status=%s duration_seconds=%.4f artifact=%s", task_id, node_name, status, float(duration_seconds), node_dir / "latest.json")
         return record
@@ -300,8 +345,49 @@ class TaskStore:
         self.memory_service.episode(task_id, event_type, {"payload": payload})
         return event
 
+    @staticmethod
+    def _acceptance_publication_id(task_id, state):
+        run_id = state.get("run_id") or state.get("graph_thread_id")
+        if not run_id:
+            return None
+        identity = {
+            "task_id": task_id, "run_id": run_id,
+            "iteration": state.get("iteration"), "pipeline": state.get("pipeline", {}),
+            "annotated_image_path": state.get("annotated_image_path"),
+        }
+        encoded = json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        return "acceptance_" + sha256(encoded).hexdigest()
+
+    def load_acceptance(self, task_id, state):
+        """Return a completed publication for this exact result, when present."""
+        path = self.task_dir(task_id) / "acceptance" / "latest.json"
+        if not path.is_file():
+            return None
+        acceptance = json.loads(path.read_text(encoding="utf-8"))
+        publication_id = self._acceptance_publication_id(task_id, state)
+        if acceptance.get("publication_id"):
+            if acceptance["publication_id"] != publication_id:
+                return None
+        elif (acceptance.get("run_dir") != state.get("run_dir")
+              or acceptance.get("annotated_image_path") != state.get("annotated_image_path")):
+            return None
+        if not acceptance.get("registry_algorithm_id"):
+            return None
+        for key in ("algorithm_path", "registry_algorithm_path"):
+            if not acceptance.get(key) or not Path(acceptance[key]).is_file():
+                return None
+        algorithm = json.loads(Path(acceptance["algorithm_path"]).read_text(encoding="utf-8"))
+        if algorithm.get("pipeline", {}) != state.get("pipeline", {}):
+            return None
+        return acceptance
+
     def accept_result(self, task_id, state, note="用户确认当前结果"):
         task_dir = self.task_dir(task_id)
+        existing = self.load_acceptance(task_id, state)
+        if existing:
+            self._complete_acceptance(task_id, existing)
+            return existing
+        publication_id = self._acceptance_publication_id(task_id, state)
         algorithm_path = task_dir / "acceptance" / "algorithm.json"
         self._write_json(algorithm_path, {
             "name": state.get("selected_candidate") or "accepted_visual_algorithm",
@@ -311,9 +397,12 @@ class TaskStore:
             "output_requirements": state.get("understanding", {}).get("output_requirements", []),
             "rendering": state.get("rendering", {}),
         })
-        published_algorithm = self.algorithm_registry.publish(task_id, state, note=note)
+        published_algorithm = self.algorithm_registry.publish(
+            task_id, state, note=note, publication_id=publication_id,
+        )
         self.memory_service.publish(task_id, published_algorithm)
         acceptance = {
+            "publication_id": publication_id,
             "accepted_at": utc_now(),
             "note": note,
             "algorithm_path": str(algorithm_path),
@@ -334,13 +423,18 @@ class TaskStore:
             ),
         }
         self._write_json(task_dir / "acceptance" / "latest.json", acceptance)
+        self._complete_acceptance(task_id, acceptance)
+        return acceptance
+
+    def _complete_acceptance(self, task_id, acceptance):
         task = self.load_task(task_id)
+        if task.get("status") == "accepted" and task.get("accepted_at") == acceptance["accepted_at"]:
+            return
         task["status"] = "accepted"
         task["accepted_at"] = acceptance["accepted_at"]
         task["updated_at"] = utc_now()
-        self._write_json(task_dir / "task.json", task)
+        self._write_json(self.task_dir(task_id) / "task.json", task)
         self.append_event(task_id, "result_accepted", acceptance)
-        return acceptance
 
     def approve_tested_operator(
         self,

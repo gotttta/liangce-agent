@@ -28,7 +28,28 @@ from ui.annotation_app import (
     store_chat_attachment,
     store_ground_truth_annotation,
 )
-from ui.utils.formatters import format_task_card
+from ui.annotation_app import _controller_node_progress_event
+from ui.utils.formatters import format_progress_card, format_task_card
+from ui.utils.progress import merge_progress_event
+
+
+def test_controller_node_events_pass_through_and_render_with_narration():
+    start = {"type": "node_start", "node": "propose", "description": "生成或修改一个算法版本", "timestamp": 1.0}
+    done = {"type": "node_complete", "node": "propose", "duration": 27.3,
+            "metadata": {"action_id": "action_0002", "status": "ok", "narration": "首次方案：亮极性阈值"}, "timestamp": 2.0}
+    legacy = {"type": "node_start", "node": "plan_candidates", "description": "生成候选", "timestamp": 3.0}
+
+    assert _controller_node_progress_event(start) == {"type": "node_start", "node": "propose",
+                                                      "description": "生成或修改一个算法版本"}
+    assert _controller_node_progress_event(done)["metadata"]["narration"] == "首次方案：亮极性阈值"
+    assert _controller_node_progress_event(legacy) is None
+
+    events = []
+    merge_progress_event(events, _controller_node_progress_event(start))
+    merge_progress_event(events, _controller_node_progress_event(done))
+    card = format_progress_card(events, running=False)
+    assert "生成或修改一个算法版本" in card
+    assert "首次方案：亮极性阈值" in card
 
 
 def test_understanding_message_does_not_ask_novice_to_confirm_technical_plan():
@@ -330,8 +351,10 @@ def test_chat_agent_runs_local_pipeline_and_offers_follow_up_actions(tmp_path, m
     monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
     class FakeQwenProvider:
         model = "qwen-test"
+        calls = 0
 
         def understand_task(self, target_image_path, description, previous_context=None):
+            type(self).calls += 1
             understanding = MockVisionProvider().understand_task(target_image_path, description)
             understanding["recommended_strategy"]["segmentation"]["sensitivity"] = 2.25
             understanding["recommended_strategy"]["notes"] = ["Qwen test strategy."]
@@ -353,7 +376,8 @@ def test_chat_agent_runs_local_pipeline_and_offers_follow_up_actions(tmp_path, m
     assert result[1]["visible"] is False
     assert result[2]["visible"] is False
     assert result[9]["visible"] is True
-    assert (tmp_path / "tasks" / task["id"] / "nodes" / "understand_task" / "latest.json").exists()
+    assert FakeQwenProvider.calls == 1
+    assert result[5]["understanding"]["recommended_strategy"]["segmentation"]["sensitivity"] == 2.25
     execution_path = tmp_path / "tasks" / task["id"] / "nodes" / "execute_candidate" / "latest.json"
     assert execution_path.exists()
     execution = json.loads(execution_path.read_text(encoding="utf-8"))
@@ -710,7 +734,8 @@ def test_resume_chat_task_restores_messages_sample_and_latest_state(tmp_path, mo
 
     restored = resume_chat_task(task["id"])
 
-    assert restored[0][-1]["content"] == "继续优化"
+    assert restored[0][0]["content"] == "继续优化"
+    assert restored[0][-1]["content"][0] == str(annotated)
     assert restored[5]["iteration"] == 2
     assert restored[7] is None
     assert restored[9] == ""

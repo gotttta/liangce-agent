@@ -1,10 +1,13 @@
 """Disposable Docker execution. No generated Python runs on the host."""
 from __future__ import annotations
 
+from contextvars import ContextVar
+from hashlib import sha256
 import json
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import subprocess
@@ -24,12 +27,67 @@ from core.pipelines.dsl import PipelineExecutionResult, is_v3_pipeline, validate
 DEFAULT_IMAGE = "liangce-sandbox:2"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+ACTION_CONTAINER_LABEL = 'org.liangce.action-container'
+container_name = ContextVar('sandbox_container_name', default=None)
 
 
 class SandboxExecutionError(RuntimeError):
     def __init__(self, message, code="execution_failed"):
         super().__init__(message)
         self.code = code
+
+
+def action_container_name(run_id, action_id):
+    if any(not isinstance(value, str) or not value for value in (run_id, action_id)):
+        raise ValueError('run and action IDs must be non-empty strings')
+    identity = json.dumps([run_id, action_id], separators=(',', ':')).encode()
+    return 'liangce-sandbox-action-' + sha256(identity).hexdigest()[:32]
+
+
+def _validate_action_container_name(name):
+    if not isinstance(name, str) or not re.fullmatch(r'liangce-sandbox-action-[a-f0-9]{32}', name):
+        raise ValueError('invalid action container name')
+    return name
+
+
+def cleanup_action_container(name, timeout_seconds=15):
+    """Remove only the exact container whose immutable ownership label matches this action."""
+    name = _validate_action_container_name(name)
+    if not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError('cleanup timeout must be finite and positive')
+    docker = _docker_binary()
+    deadline = time.monotonic() + timeout_seconds
+    def run(args, cap):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SandboxExecutionError('Docker recovery cleanup timed out for ' + name, code='cleanup_failed')
+        return subprocess.run([docker, *args], capture_output=True, timeout=min(cap, remaining))
+    def absent(result):
+        return result.returncode and any(message in result.stderr for message in
+            (b'No such object', b'No such container'))
+    try:
+        probe = run(['inspect', '--type', 'container', name], 5)
+        if absent(probe):
+            return
+        if probe.returncode:
+            raise SandboxExecutionError('Docker could not inspect action container ' + name, code='cleanup_failed')
+        records = json.loads(probe.stdout)
+        if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+            raise ValueError('invalid Docker inspection result')
+        record = records[0]
+        labels = (record.get('Config') or {}).get('Labels') or {}
+        identity = record.get('Id')
+        if (record.get('Name') != '/' + name or labels.get(ACTION_CONTAINER_LABEL) != name
+                or not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{64}', identity)):
+            raise SandboxExecutionError('Docker container ownership does not match action ' + name, code='cleanup_failed')
+        removed = run(['rm', '-f', identity], 10)
+        if removed.returncode and not absent(removed):
+            probe = run(['inspect', '--type', 'container', identity], 5)
+            if not absent(probe):
+                raise SandboxExecutionError('Docker recovery cleanup failed for ' + name, code='cleanup_failed')
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError) as exc:
+        raise SandboxExecutionError('Docker recovery cleanup could not complete for ' + name,
+                                    code='cleanup_failed') from exc
 
 
 @dataclass(frozen=True)
@@ -72,7 +130,7 @@ def _docker_binary():
 
 
 def _run_args(docker, name, limits):
-    return [docker, "create", "--name", name, "--rm", "--pull=never", "-i",
+    args = [docker, "create", "--name", name, "--rm", "--pull=never", "-i",
             "--network=none", "--read-only", "--user=65534:65534",
             "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
             "--memory", f"{limits.memory_mb}m", "--memory-swap", f"{limits.memory_mb}m",
@@ -83,6 +141,10 @@ def _run_args(docker, name, limits):
             "--env=OPENBLAS_NUM_THREADS=1", "--env=OMP_NUM_THREADS=1",
             "--env=MKL_NUM_THREADS=1", "--env=HOME=/tmp",
             os.environ.get("LIANGCE_SANDBOX_IMAGE", DEFAULT_IMAGE)]
+    if name.startswith('liangce-sandbox-action-'):
+        _validate_action_container_name(name)
+        args[-1:-1] = ['--label', ACTION_CONTAINER_LABEL + '=' + name]
+    return args
 
 
 def check_sandbox_available():
@@ -149,8 +211,9 @@ def execute_pipeline_sandbox(image, pipeline, limits=None, inputs=None):
         request = encode_frame({"image": array, "pipeline": pipeline, "inputs": inputs or {}}, MAX_INPUT_BYTES)
     except ValueError as exc:
         raise SandboxExecutionError(str(exc), code="resource_limit") from exc
+    requested_name = container_name.get()
+    name = _validate_action_container_name(requested_name) if requested_name is not None else 'liangce-sandbox-' + uuid.uuid4().hex
     docker = _docker_binary()
-    name = "liangce-sandbox-" + uuid.uuid4().hex
     process = None
     try:
         # Create first so timeout cleanup cannot race a still-starting `docker run`.
@@ -200,9 +263,13 @@ def execute_pipeline_sandbox(image, pipeline, limits=None, inputs=None):
             # container itself is still removed below; killing the CLI is not cleanup.
             if process is not None and process.poll() is None:
                 process.kill()
-            cleanup = subprocess.run([docker, "rm", "-f", name], stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, timeout=10)
-            if cleanup.returncode and b"No such container" not in cleanup.stderr:
+            if requested_name is not None:
+                cleanup_action_container(name)
+                cleanup = None
+            else:
+                cleanup = subprocess.run([docker, "rm", "-f", name], stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, timeout=10)
+            if cleanup is not None and cleanup.returncode and b"No such container" not in cleanup.stderr:
                 # --rm may finish removing the container concurrently with rm -f.
                 # Only a confirmed absence is success; daemon/permission errors stay errors.
                 probe = subprocess.run([docker, "inspect", "--type", "container", name],
