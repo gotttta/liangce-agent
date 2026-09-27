@@ -99,8 +99,8 @@ def test_05_bridge_passes_overlap_but_fails_object_gate():
 
 
 def test_05_gt_does_not_bypass_visual_or_delivery_review(tmp_path, monkeypatch):
-    from core.agent_graph import _make_review_candidates_node
-    monkeypatch.setattr('core.agent_graph.promote_candidate_result', lambda state, name: state)
+    from core.graph_nodes import make_review_candidates_node
+    monkeypatch.setattr('core.graph_nodes.promote_candidate_result', lambda state, name: state)
     candidate = {'name': 'one', 'status': 'selected_for_review',
                  'quality': {'coverage': .1, 'evaluation': {'status': 'ok', 'dice': 1, 'precision': 1,
                     'recall': 1, 'boundary_f1': 1, 'count_error': 0}},
@@ -114,7 +114,7 @@ def test_05_gt_does_not_bypass_visual_or_delivery_review(tmp_path, monkeypatch):
     state = {'target_image_path': 'x', 'description': '荧光绿', 'ground_truth_mask_path': 'gt',
              'selected_candidate': 'one', 'candidate_attempts': [candidate],
              'task_contract': {'acceptance_criteria': {'requested_output': ['width_measurement']}}}
-    result = _make_review_candidates_node(provider)(state)
+    result = make_review_candidates_node(provider)(state)
     assert provider.calls == 1
     assert result['review']['decision'] == 'revise'
     assert not result['review']['acceptance']['overall_passed']

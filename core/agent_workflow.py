@@ -21,7 +21,7 @@ from core.tools.contracts import ToolError
 
 
 def build_tool_agent_graph(provider, checkpointer, algorithm_registry=None):
-    from core.agent_graph import _wait_for_human
+    from core.graph_nodes import wait_for_human
     runtime = ToolAgentRuntime(provider, algorithm_registry)
     # Routing is exclusive. Explicit replacement also lets LangGraph's graph
     # renderer simulate converging conditional branches without LastValue errors.
@@ -37,7 +37,7 @@ def build_tool_agent_graph(provider, checkpointer, algorithm_registry=None):
     }
     for name, phases in nodes.items():
         graph.add_node(name, runtime.node(phases))
-    graph.add_node('wait_for_human', _wait_for_human)
+    graph.add_node('wait_for_human', wait_for_human)
     graph.add_node('finish', lambda state: state)
     graph.set_entry_point('initialize_run')
     routes = {
@@ -194,7 +194,7 @@ class ToolAgentRuntime(RunController):
                 draft = DraftStore(state['run_dir']).get(args['draft_id'], args['revision'])
                 if not draft['validation']['valid']:
                     raise ToolError('pipeline_invalid', 'Draft is invalid; repair before execution')
-                from core.agent_loop import pipeline_fingerprint
+                from core.experiments.runner import pipeline_fingerprint
                 duplicate = next((item for item in state.get('experiment_records', [])
                     if item.get('scope') == state['input_scope'] and
                     pipeline_fingerprint(item.get('pipeline')) == pipeline_fingerprint(draft['pipeline'])), None)

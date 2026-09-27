@@ -106,14 +106,14 @@ def test_derived_record_failure_preserves_checkpointed_outcome(entry, monkeypatc
     elif derived_write == "node":
         monkeypatch.setattr(TaskStore, "save_node_result", fail_write)
     else:
-        original = agent_graph._write_trajectory
+        original = agent_graph.write_trajectory
 
         def fail_final_trajectory(state):
             if state.get("__interrupt__"):
                 fail_write()
             return original(state)
 
-        monkeypatch.setattr(agent_graph, "_write_trajectory", fail_final_trajectory)
+        monkeypatch.setattr(agent_graph, "write_trajectory", fail_final_trajectory)
 
     with pytest.raises(OSError, match="derived record unavailable"):
         run()

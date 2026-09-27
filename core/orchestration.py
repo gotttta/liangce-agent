@@ -29,12 +29,12 @@ class InputScopeChangedError(ValueError):
 
 
 def build_controller_graph(provider, checkpointer, algorithm_registry=None):
-    from core.agent_graph import _wait_for_human
+    from core.graph_nodes import wait_for_human
     runner = RunController(provider, algorithm_registry)
     graph = StateGraph(dict)
     graph.add_node('controller', runner.advance)
     graph.add_node('effect', runner.perform)
-    graph.add_node('wait_for_human', _wait_for_human)
+    graph.add_node('wait_for_human', wait_for_human)
     graph.set_entry_point('controller')
     graph.add_conditional_edges('controller', lambda state: (
         'effect' if state.get('pending_action') else
@@ -257,9 +257,9 @@ class RunController:
         self._validate_scope(state)
         phase = action['kind']
         if phase == 'prepare':
-            from core.agent_graph import _prepare_inputs
+            from core.graph_nodes import prepare_inputs
             from core.sandbox import check_sandbox_available
-            prepared = _prepare_inputs(state)
+            prepared = prepare_inputs(state)
             from core.runtime_metadata import runtime_metadata
             environment = {**check_sandbox_available(), 'runtime': runtime_metadata()}
             memory = dict(state.get('memory_context') or {})
@@ -314,7 +314,7 @@ class RunController:
             raise InputScopeChangedError('输入图片、参考图或反馈在运行期间发生变化，请重新发起运行。')
 
     def _recover_execution(self, state, action):
-        from core.agent_loop import pipeline_fingerprint
+        from core.experiments.runner import pipeline_fingerprint
         from core.experiments.delivery import verify_manifest
         from core.runtime_metadata import runtime_metadata
         directory = Path(state['run_dir']) / f"iteration_{action['iteration']}"
@@ -497,12 +497,12 @@ class RunController:
             elif phase == 'propose' and kind in {'propose', 'edit'}:
                 state.update(proposal=data, phase='draft')
             elif phase == 'review' and kind == 'review':
-                from core.agent_graph import _make_review_candidates_node
+                from core.graph_nodes import make_review_candidates_node
                 review = data.get('review')
                 if not isinstance(review, dict):
                     return self._finish(state, 'failed', 'invalid_review', '模型未返回有效复查结论。')
                 adapter = SimpleNamespace(review_candidates=lambda *args, **kwargs: deepcopy(review))
-                state = _make_review_candidates_node(adapter)(state)
+                state = make_review_candidates_node(adapter)(state)
                 state['read_results'] = self._static_evidence(state)
                 if (state['review'].get('acceptance') or {}).get('overall_passed'):
                     return self._finish(state, 'awaiting_feedback', 'review_passed', state['review'].get('reason', '复查通过，等待人工确认。'))
@@ -523,7 +523,7 @@ class RunController:
             if not validation['valid']:
                 state.update(last_error=validation['error'], phase='propose')
             else:
-                from core.agent_loop import pipeline_fingerprint
+                from core.experiments.runner import pipeline_fingerprint
                 draft = DraftStore(Path(state['run_dir'])).get(state['current_draft']['draft_id'])
                 repeated = any(item.get('scope') == state['input_scope'] and
                                pipeline_fingerprint(item.get('pipeline')) == pipeline_fingerprint(draft['pipeline'])
@@ -578,6 +578,6 @@ class RunController:
                      decision={'next_action': 'wait_for_acceptance' if status == 'awaiting_feedback' else 'stop',
                                'reason': message, 'automatic_review_passed': reason == 'review_passed'})
         state['conversation'] = [*state.get('conversation', []), {'role': 'assistant', 'content': message}]
-        from core.agent_graph import _write_trajectory
-        _write_trajectory(state)
+        from core.graph_nodes import write_trajectory
+        write_trajectory(state)
         return state
