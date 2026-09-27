@@ -1316,7 +1316,6 @@ def run_chat_agent(
             description=message,
             output_root=ROOT / "outputs",
             unit="pixel",
-            max_candidates=1,
             previous_state=previous_state,
             reference_examples=reference_examples,
             ground_truth_mask_path=ground_truth.get("mask_path"),

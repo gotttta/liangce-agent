@@ -16,7 +16,7 @@ class NeedsInputProvider:
     def __init__(self):
         self.calls = 0
 
-    def propose_action(self, *args, **kwargs):
+    def agent_action(self, *args, **kwargs):
         self.calls += 1
         return {"kind": "needs_input", "reason": "Need the target boundary"}
 
@@ -173,11 +173,25 @@ def test_human_completion_advances_both_checkpoint_and_projection(tmp_path, monk
         "method": "bright_threshold", "sensitivity": 1, "min_area_px": 2, "morphology": "none"}})
 
     class Provider:
-        def propose_action(self, *args, **kwargs):
-            return {"kind": "propose", "understanding": {
-                "task_summary": "Find bright region", "recommended_strategy": strategy,
-                "target_constraints": {}, "rendering": {}},
-                "pipeline": strategy_to_pipeline(strategy), "change_reason": "Threshold bright pixels"}
+        def agent_action(self, target, description, context, **kwargs):
+            last = context.get("last_tool_result") or {}
+            if (last.get("error") or {}).get("code") == "execution_budget_exhausted":
+                return {"kind": "needs_input", "reason": "No executions remain"}
+            if last.get("tool") == "execute_pipeline":
+                return {"kind": "tool", "tool": "submit_experiment", "arguments": {
+                    "experiment_id": context["experiment_summaries"][-1]["experiment_id"], "reason": "Executed"}}
+            if last.get("tool") == "create_draft":
+                draft = context["current_draft"]
+                return {"kind": "tool", "tool": "execute_pipeline",
+                        "arguments": {"draft_id": draft["draft_id"], "revision": draft["revision"]}}
+            # First draft, or a new algorithm after review asked for revision.
+            revised = normalize_strategy({"segmentation": {**strategy["segmentation"],
+                                          "sensitivity": 2 if context.get("current_draft") else 1}})
+            arguments = {"pipeline": strategy_to_pipeline(revised), "change_reason": "Threshold bright pixels"}
+            if not context.get("task_contract"):
+                arguments["understanding"] = {"task_summary": "Find bright region",
+                    "recommended_strategy": strategy, "target_constraints": {}, "rendering": {}}
+            return {"kind": "tool", "tool": "create_draft", "arguments": arguments}
 
         def review_action(self, target, description, candidates, **kwargs):
             return {"kind": "review", "review": {"decision": automatic_decision,
@@ -191,9 +205,11 @@ def test_human_completion_advances_both_checkpoint_and_projection(tmp_path, monk
                               thread_id="human_completion")
     assert Path(waiting["annotated_image_path"]).is_file()
     if automatic_decision == "revise":
-        assert waiting["run_status"] == "stopped"
-        assert waiting["stop_reason"] == "execution_budget_exhausted"
-        assert not waiting.get("interrupt")
+        # v2 reports the exhausted budget to the Agent, which then asks the user.
+        assert waiting["run_status"] == "awaiting_feedback"
+        assert waiting["stop_reason"] == "needs_input"
+        assert waiting["last_tool_result"]["error"]["code"] == "execution_budget_exhausted"
+        assert waiting["interrupt"][0]["value"]["kind"] == "human_review"
     completed = resume_agent_graph("human_completion", {"action": "accept"})
 
     persisted = store.load_latest_state(task_id)

@@ -145,22 +145,3 @@ def test_candidate_runs_record_failures_artifacts_and_parent(tmp_path):
         assert record['experiment_id'] == attempt['experiment_id']
     assert state['candidate_attempts'][0]['status'] == 'failed'
     assert state['candidate_attempts'][1]['artifacts']
-
-
-def test_failed_revision_retains_prior_renderable_result(tmp_path):
-    from core.agent_graph import _report_failure
-    previous = tmp_path / 'iteration_0' / 'candidate_0'
-    previous.mkdir(parents=True)
-    (tmp_path / 'iteration_1').mkdir()
-    Image.new('L', (4, 4), 255).save(previous / 'result_annotation.png')
-    Image.new('L', (4, 4), 255).save(previous / 'mask.png')
-    attempt = {'name': 'prior', 'status': 'selected_for_review', 'directory': str(previous),
-               'pipeline': {}, 'experiment_id': 'prior-id'}
-    state = _report_failure({'run_dir': str(tmp_path), 'iteration': 1, 'revision_count': 1,
-                             'candidate_attempts': [], 'experiment_history': [
-                                 {'candidate_attempts': [attempt], 'selected_candidate': 'prior'}]})
-    assert state['retained_experiment_id'] == 'prior-id'
-    assert state['selected_experiment_id'] == 'prior-id'
-    assert state['candidate_attempts'] == []
-    assert state['status'] == 'needs_human_review'
-    assert (tmp_path / 'iteration_1' / 'result_annotated.png').exists()

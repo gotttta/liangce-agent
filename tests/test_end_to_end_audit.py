@@ -67,22 +67,21 @@ def test_04_count_has_explicit_exact_semantics(text, count):
 
 
 def test_03_revision_keeps_contract_and_normalization_is_idempotent():
-    from core.agent_graph import _make_understand_task_node, _make_revise_candidates_node
+    from core.task_contract import apply_contract, establish_contract
     understanding = {'task_summary': '所有目标都闭合', 'rendering': {'contour_color': '#39FF14'},
                      'output_requirements': ['mask'], 'candidate_pipelines': [],
                      'acceptance_criteria': {'task_goal': '所有目标都闭合', 'count_policy': 'exact',
                                              'count_source': 'user_explicit', 'expected_count': 3}}
-    state = {'description': '检测3个目标，所有目标都闭合，荧光绿', 'understanding': understanding,
-             'target_image_path': 'unused.png', 'unit': 'pixel', 'max_candidates': 1}
-    state = _make_understand_task_node(None)(state)
+    state = {'description': '检测3个目标，所有目标都闭合，荧光绿', 'unit': 'pixel'}
+    state['task_contract'] = establish_contract(state, understanding)
     original = deepcopy(state['task_contract'])
-    class Provider:
-        def understand_task(self, *args, **kwargs):
-            return {'task_summary': '只标中央目标', 'rendering': {'contour_color': '#ff0000'},
-                    'acceptance_criteria': {'task_goal': '只标中央目标'}, 'candidate_pipelines': []}
-    revised = _make_revise_candidates_node(Provider(), 1)(state)
-    assert revised['task_contract'] == original
-    assert revised['understanding']['rendering']['contour_color'] == '#39FF14'
+    # An automatic revision proposes different requirements without a user quote.
+    proposed = {'task_summary': '只标中央目标', 'rendering': {'contour_color': '#ff0000'},
+                'acceptance_criteria': {'task_goal': '只标中央目标'}, 'candidate_pipelines': []}
+    contract = establish_contract(state, proposed)
+    revised = apply_contract(proposed, contract)
+    assert contract == original
+    assert revised['rendering']['contour_color'] == '#39FF14'
     assert revised['acceptance_criteria']['expected_count'] == 3
     assert normalize_acceptance_criteria(revised['acceptance_criteria']) == revised['acceptance_criteria']
 

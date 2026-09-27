@@ -68,12 +68,17 @@ def proposal():
     }
 
 
-def test_proposal_uses_one_request_preserves_custom_v3_and_has_no_mutation_tools(monkeypatch, target):
-    raw = proposal()
+def draft_call():
+    return {"kind": "tool", "tool": "create_draft",
+            "arguments": {key: value for key, value in proposal().items() if key != "kind"}}
+
+
+def test_draft_uses_one_request_preserves_custom_v3_and_has_no_native_tools(monkeypatch, target):
+    raw = draft_call()
     state = install_client(monkeypatch, raw)
     provider = AliyunVisionProvider(api_key="test", max_retries=9)
 
-    action = provider.propose_action(target, "Locate visible objects", context={"task_contract": {}})
+    action = provider.agent_action(target, "Locate visible objects", context={"task_contract": {}})
 
     assert len(state["requests"]) == 1
     assert state["clients"][0]["max_retries"] == 0
@@ -83,20 +88,18 @@ def test_proposal_uses_one_request_preserves_custom_v3_and_has_no_mutation_tools
     assert request["max_tokens"] == 8192
     assert request["response_format"] == {"type": "json_object"}
     assert "tools" not in request
-    assert action["pipeline"] == raw["pipeline"]
-    assert action["understanding"]["output_requirements"] == ["points"]
+    assert action["tool"] == "create_draft"
+    assert action["arguments"]["pipeline"] == raw["arguments"]["pipeline"]
+    assert action["arguments"]["understanding"]["output_requirements"] == ["points"]
     assert state["client_closed"]
     assert "save_task" not in request["messages"][0]["content"]
-    assert "execute_pipeline" not in request["messages"][0]["content"]
 
 
-def test_read_action_returns_to_controller_without_executing_or_followup(monkeypatch, target):
-    raw = {"kind": "read", "requests": [
-        {"tool": "query_operators", "arguments": {"names": ["global_threshold", "filter_components"]}},
-        {"tool": "load_skill", "arguments": {"name": "area"}},
-    ]}
+def test_read_tool_returns_one_action_without_executing_or_followup(monkeypatch, target):
+    raw = {"kind": "tool", "tool": "query_operators",
+           "arguments": {"names": ["global_threshold", "filter_components"]}}
     state = install_client(monkeypatch, raw)
-    assert AliyunVisionProvider(api_key="test").propose_action(target, "Find objects") == raw
+    assert AliyunVisionProvider(api_key="test").agent_action(target, "Find objects") == raw
     assert len(state["requests"]) == 1
 
 
@@ -106,7 +109,7 @@ def test_json_completion_emits_usage_and_one_complete_action(monkeypatch, target
     chunks, responses = [], []
     monkeypatch.setattr("providers.vision.emit_llm_chunk", lambda text, **kwargs: chunks.append(text))
     monkeypatch.setattr("providers.vision.emit_llm_response", lambda *args, **kwargs: responses.append(kwargs))
-    assert AliyunVisionProvider(api_key="test").propose_action(target, "Measure spacing") == action
+    assert AliyunVisionProvider(api_key="test").agent_action(target, "Measure spacing") == action
     assert chunks == [json.dumps(action)]
     assert responses[0]["usage"] == {"prompt_tokens": 128, "completion_tokens": 64, "total_tokens": 192}
     assert len(state["requests"]) == 1
@@ -250,11 +253,11 @@ def test_action_prompt_distinguishes_builtin_grayscale_from_optional_rgb(target)
 
 def test_oversized_essential_context_fails_before_model_request(monkeypatch, target):
     monkeypatch.setenv("LIANGCE_LLM_MAX_TEXT_CHARS", "20000")
-    state = install_client(monkeypatch, proposal())
+    state = install_client(monkeypatch, draft_call())
     context = {"task_contract": {"visual_checks": ["X" * 30000]}, "latest_experiment": {"experiment_id": "exp_3"}}
     before = deepcopy(context)
     with pytest.raises(ContextBudgetError, match="context_budget_exceeded"):
-        AliyunVisionProvider(api_key="test").propose_action(target, "All objects", context=context)
+        AliyunVisionProvider(api_key="test").agent_action(target, "All objects", context=context)
     assert state["requests"] == [] and state["clients"] == []
     assert context == before
 
@@ -275,16 +278,16 @@ def test_revision_includes_latest_overlay_and_mask_with_previous_pipeline(target
 def test_failed_request_is_not_retried_or_downgraded(monkeypatch, target, error):
     state = install_client(monkeypatch, None, error=error)
     with pytest.raises(type(error), match=str(error)):
-        AliyunVisionProvider(api_key="test", max_retries=3).propose_action(target, "All objects")
+        AliyunVisionProvider(api_key="test", max_retries=3).agent_action(target, "All objects")
     assert len(state["requests"]) == 1
     assert state["client_closed"]
 
 
-@pytest.mark.parametrize("text,finish", [("not JSON", "stop"), (json.dumps(proposal()), "length")])
+@pytest.mark.parametrize("text,finish", [("not JSON", "stop"), (json.dumps(draft_call()), "length")])
 def test_invalid_or_truncated_response_does_not_start_followup(monkeypatch, target, text, finish):
     state = install_client(monkeypatch, text, finish_reason=finish)
     with pytest.raises(ValueError):
-        AliyunVisionProvider(api_key="test").propose_action(target, "All objects")
+        AliyunVisionProvider(api_key="test").agent_action(target, "All objects")
     assert len(state["requests"]) == 1
 
 
@@ -294,7 +297,7 @@ def test_wall_timeout_cancels_hanging_json_request(monkeypatch, target):
     provider.action_timeout_seconds = 0.03
     started = time.monotonic()
     with pytest.raises(TimeoutError):
-        provider.propose_action(target, "All objects")
+        provider.agent_action(target, "All objects")
     assert time.monotonic() - started < 1
     assert state["cancelled"] and state["client_closed"]
     assert len(state["requests"]) == 1
@@ -308,7 +311,7 @@ def test_parent_cancellation_interrupts_stalled_network_request(monkeypatch, tar
     timer.start()
     try:
         with pytest.raises(RequestCancelled):
-            AliyunVisionProvider(api_key="test").propose_action(target, "All objects")
+            AliyunVisionProvider(api_key="test").agent_action(target, "All objects")
     finally:
         control.reset(token)
         timer.join()

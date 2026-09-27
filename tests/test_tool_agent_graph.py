@@ -12,7 +12,18 @@ from core.agent_protocol import build_agent_messages, normalize_agent_action
 from core.agent_workflow import ToolAgentRuntime
 from core.memory.checkpoints import get_checkpointer
 from core.orchestration_runtime import ActionStore
-from test_run_controller import proposal
+from agent_types import normalize_strategy
+from core.pipelines.dsl import strategy_to_pipeline
+
+
+def proposal(sensitivity=1):
+    strategy = normalize_strategy({'segmentation': {
+        'method': 'bright_threshold', 'sensitivity': sensitivity,
+        'min_area_px': 2, 'morphology': 'none'}})
+    return {'kind': 'propose', 'understanding': {
+        'task_summary': 'Find the bright region', 'recommended_strategy': strategy,
+        'target_constraints': {}, 'rendering': {}},
+        'pipeline': strategy_to_pipeline(strategy), 'change_reason': 'Threshold bright pixels'}
 
 
 def call(tool, **arguments):
@@ -197,13 +208,22 @@ def test_protocol_and_prompt_expose_tools_without_automatic_execution(target):
         normalize_agent_action(call('unrestricted_shell', cmd='x'), description='x')
 
 
-def test_old_controller_checkpoint_keeps_old_graph_on_new_provider(target):
-    from test_run_controller import Provider
-    old = run(target, Provider(), thread_id='v1_compatibility')
-    assert old['orchestration_version'] == 1
-    restored = run(target, Agent(), thread_id='v1_compatibility')
-    assert restored['orchestration_version'] == 1
-    assert restored['budget'] == old['budget']
+@pytest.mark.parametrize('channels', [
+    {'task_id': 'old', 'status': 'pending'},  # v1 per-key state channels
+    {'__root__': {'orchestration_version': 1, 'task_id': 'old'}},  # retired controller
+])
+def test_retired_checkpoints_require_a_new_task(target, channels):
+    from langgraph.checkpoint.base import empty_checkpoint
+    from core.agent_graph import OLD_CHECKPOINT_MESSAGE
+    checkpoint = empty_checkpoint()
+    checkpoint['channel_values'] = channels
+    get_checkpointer().put({'configurable': {'thread_id': 'retired', 'checkpoint_ns': ''}}, checkpoint, {}, {})
+    agent = Agent()
+    with pytest.raises(ValueError, match=OLD_CHECKPOINT_MESSAGE):
+        run(target, agent, thread_id='retired')
+    with pytest.raises(ValueError, match=OLD_CHECKPOINT_MESSAGE):
+        resume_agent_graph('retired', {'action': 'accept'})
+    assert agent.calls == []
 
 
 def test_real_provider_message_parser_drives_new_graph(target):

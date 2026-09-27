@@ -349,11 +349,11 @@ def test_chat_agent_runs_local_pipeline_and_offers_follow_up_actions(tmp_path, m
 
     monkeypatch.setattr("ui.annotation_app.ROOT", tmp_path)
     monkeypatch.setattr("ui.annotation_app.TASK_ROOT", tmp_path / "tasks")
-    class FakeQwenProvider:
+    class FakeQwenProvider(MockVisionProvider):
         model = "qwen-test"
         calls = 0
 
-        def understand_task(self, target_image_path, description, previous_context=None):
+        def understand_task(self, target_image_path, description, previous_context=None, **kwargs):
             type(self).calls += 1
             understanding = MockVisionProvider().understand_task(target_image_path, description)
             understanding["recommended_strategy"]["segmentation"]["sensitivity"] = 2.25

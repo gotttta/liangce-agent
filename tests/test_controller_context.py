@@ -1,4 +1,4 @@
-"""Exercise durable requirements and visual evidence through the real action parser."""
+"""Exercise durable requirements and visual evidence through the real v2 tool parser."""
 from copy import deepcopy
 from hashlib import sha256
 import json
@@ -25,15 +25,42 @@ def snapshot(messages):
 def proposal(*, initial=True, sensitivity=1):
     strategy = normalize_strategy({"segmentation": {"method": "bright_threshold", "sensitivity": sensitivity,
                                                     "min_area_px": 2, "morphology": "none"}})
-    action = {"kind": "propose", "pipeline": strategy_to_pipeline(strategy),
-              "change_reason": "Threshold observed bright pixels", "expected_change": "Recover bright region"}
+    arguments = {"pipeline": strategy_to_pipeline(strategy),
+                 "change_reason": "Threshold observed bright pixels", "expected_change": "Recover bright region"}
     if initial:
-        action["understanding"] = {
+        arguments["understanding"] = {
             "task_summary": "Find bright regions", "recommended_strategy": strategy,
             "target_constraints": {}, "output_requirements": ["mask"],
             "rendering": {"annotation_mode": "mask", "contour_color": "#ff0000"},
         }
-    return action
+    return tool("create_draft", **arguments)
+
+
+def tool(tool_name, /, **arguments):
+    return {"kind": "tool", "tool": tool_name, "arguments": arguments}
+
+
+def read(tool_name, /, **arguments):
+    return tool(tool_name, **arguments)
+
+
+def execute(messages):
+    draft = snapshot(messages)["current_draft"]
+    return tool("execute_pipeline", draft_id=draft["draft_id"], revision=draft["revision"])
+
+
+def submit(messages):
+    experiment = snapshot(messages)["experiment_summaries"][-1]
+    return tool("submit_experiment", experiment_id=experiment["experiment_id"], reason="Executed draft looks usable")
+
+
+def attempt(draft):
+    """One Agent experiment: save the draft, execute it and submit the result."""
+    return [draft, execute, submit]
+
+
+def with_updates(action, **updates):
+    return {**action, "arguments": {**action["arguments"], **updates}}
 
 
 def review(decision="present"):
@@ -49,9 +76,6 @@ def review(decision="present"):
 
 
 class ScriptedProvider(AliyunVisionProvider):
-    # These fixtures exercise the version-one checkpoint compatibility protocol.
-    agent_action = None
-
     def __init__(self, responses):
         super().__init__(api_key="test-no-network")
         self.responses = list(responses)
@@ -79,18 +103,19 @@ def run(target, provider, description="Find bright regions", **kwargs):
 
 
 def test_explicit_new_user_change_is_applied_once_and_frozen_through_revision(target):
-    first = run(target, ScriptedProvider([proposal(), review()]))
+    first = run(target, ScriptedProvider([*attempt(proposal()), review()]))
     initial_contract = deepcopy(first["task_contract"])
     description = "Change contour color to green"
     green_rendering = {**initial_contract["rendering"], "contour_color": "#39FF14"}
-    changed = {**proposal(initial=False),
-               "contract_updates": [{"field": "rendering", "value": green_rendering, "source_quote": description}],
-               "memory_updates": [{"op": "set", "key": "constraint:color", "value": "green", "scope": "task",
-                                   "source_quote": description}]}
-    forbidden = {**proposal(initial=False, sensitivity=.5), "contract_updates": [
+    changed = with_updates(proposal(initial=False),
+        contract_updates=[{"field": "rendering", "value": green_rendering, "source_quote": description}],
+        memory_updates=[{"op": "set", "key": "constraint:color", "value": "green", "scope": "task",
+                         "source_quote": description}])
+    forbidden = with_updates(proposal(initial=False, sensitivity=.5), contract_updates=[
         {"field": "rendering", "value": initial_contract["rendering"], "source_quote": description},
-    ]}
-    provider = ScriptedProvider([changed, review("revise"), forbidden, proposal(initial=False, sensitivity=.5), review()])
+    ])
+    provider = ScriptedProvider([*attempt(changed), review("revise"), forbidden,
+                                 *attempt(proposal(initial=False, sensitivity=.5)), review()])
 
     result = run(target, provider, description, task_id=first["task_id"])
 
@@ -98,11 +123,11 @@ def test_explicit_new_user_change_is_applied_once_and_frozen_through_revision(ta
     assert result["task_contract"]["rendering"] == green_rendering
     assert result["task_contract"]["version"] == initial_contract["version"] + 1
     assert result["task_contract"]["changes"] == [{"field": "rendering", "source_quote": description}]
-    assert result["budget"]["usage"] == {"model_calls": 5, "executions": 2}
+    assert result["budget"]["usage"] == {"model_calls": 9, "executions": 2}
     contexts = [snapshot(messages) for messages in provider.messages]
     assert contexts[0]["allow_contract_updates"] is True
     assert all(context["allow_contract_updates"] is False for context in contexts[1:])
-    assert "immutable_task_contract" in contexts[3]["last_error"]["error"]
+    assert "immutable_task_contract" in json.dumps([contexts[5]["last_tool_result"], contexts[5]["last_error"]])
     assert all(context["task_contract"]["rendering"] == green_rendering for context in contexts[1:])
     store = TaskStore(result["memory_context"]["task_root"])
     assert store.memory_service.snapshot(result["task_id"], result["input_sha256"])["active_constraints"]["color"] == "green"
@@ -110,28 +135,31 @@ def test_explicit_new_user_change_is_applied_once_and_frozen_through_revision(ta
 
 
 def test_unquoted_new_user_update_is_rejected_before_draft_and_contract_stays_exact(target):
-    first = run(target, ScriptedProvider([proposal(), review()]))
-    invalid = {**proposal(initial=False), "contract_updates": [{
+    first = run(target, ScriptedProvider([*attempt(proposal()), review()]))
+    invalid = with_updates(proposal(initial=False), contract_updates=[{
         "field": "rendering", "value": {"contour_color": "#39FF14"}, "source_quote": "Change contour color to green",
-    }]}
+    }])
     provider = ScriptedProvider([invalid, {"kind": "needs_input", "reason": "Need a clearer target description"}])
     result = run(target, provider, "Keep the original contour color", task_id=first["task_id"])
     assert result["task_contract"] == first["task_contract"]
     assert result["budget"]["usage"]["executions"] == 0
     assert not result.get("current_draft")
-    assert "source_quote" in snapshot(provider.messages[1])["last_error"]["error"]
+    feedback = snapshot(provider.messages[1])
+    assert "source_quote" in json.dumps([feedback["last_tool_result"], feedback["last_error"]])
 
 
 def test_read_evidence_accumulates_exact_skill_definitions_and_review_crop_images(target):
-    skill = {"kind": "read", "requests": [{"tool": "load_skill", "arguments": {"name": "area_measurement"}}]}
-    definitions = {"kind": "read", "requests": [{"tool": "query_operators", "arguments": {"names": ["global_threshold"]}}]}
+    skill = read("load_skill", name="area_measurement")
+    definitions = read("query_operators", names=["global_threshold"])
+    review_definitions = {"kind": "read", "requests": [
+        {"tool": "query_operators", "arguments": {"names": ["global_threshold"]}}]}
 
     def crop(messages):
         return {"kind": "read", "requests": [{"tool": "inspect_experiment", "arguments": {
             "experiment_id": snapshot(messages)["latest_experiment"]["experiment_id"], "region": [0, 0, 24, 24],
         }}]}
 
-    provider = ScriptedProvider([skill, definitions, proposal(), crop, definitions, review()])
+    provider = ScriptedProvider([skill, definitions, *attempt(proposal()), crop, review_definitions, review()])
     result = run(target, provider)
 
     assert result["stop_reason"] == "review_passed"
@@ -153,47 +181,46 @@ def test_read_evidence_accumulates_exact_skill_definitions_and_review_crop_image
         message["content"] if isinstance(message["content"], list) else []
     ) if part.get("type") == "image_url"]
     assert all(image_content(path, "crop")["image_url"]["url"] in encoded for path in crop_result["images"])
-    assert result["budget"]["usage"] == {"model_calls": 6, "executions": 1}
+    assert result["budget"]["usage"] == {"model_calls": 8, "executions": 1}
 
 
 def test_static_definitions_survive_review_revision_and_patch_conflict(target):
-    definitions = {"kind": "read", "requests": [
-        {"tool": "load_skill", "arguments": {"name": "area_measurement"}},
-        {"tool": "query_operators", "arguments": {"names": ["global_threshold", "filter_components"]}},
-    ]}
+    skill = read("load_skill", name="area_measurement")
+    definitions = read("query_operators", names=["global_threshold", "filter_components"])
 
     def crop(messages):
-        return {"kind": "read", "requests": [{"tool": "inspect_experiment", "arguments": {
-            "experiment_id": snapshot(messages)["latest_experiment"]["experiment_id"], "region": [0, 0, 24, 24],
-        }}]}
+        return read("inspect_experiment", experiment_id=snapshot(messages)["latest_experiment"]["experiment_id"],
+                    region=[0, 0, 24, 24])
 
     def conflicting_edit(messages):
         draft = snapshot(messages)["current_draft"]
-        return {"kind": "edit", "draft_id": draft["draft_id"], "base_revision": draft["revision"],
-                "change_reason": "Fix boundary based on the inspected region",
-                "edits": [{"path": "/nonexistent_parameter", "old": 1, "new": 2}]}
+        return tool("edit_draft", draft_id=draft["draft_id"], base_revision=draft["revision"],
+                    change_reason="Fix boundary based on the inspected region",
+                    edits=[{"path": "/nonexistent_parameter", "old": 1, "new": 2}])
 
-    provider = ScriptedProvider([
-        definitions, proposal(), review("revise"), crop, conflicting_edit,
-        proposal(initial=False, sensitivity=.5), review(),
-    ])
-
-    result = run(target, provider)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("LIANGCE_RUN_MAX_MODEL_CALLS", "16")
+        provider = ScriptedProvider([
+            skill, definitions, *attempt(proposal()), review("revise"), crop, conflicting_edit,
+            *attempt(proposal(initial=False, sensitivity=.5)), review(),
+        ])
+        result = run(target, provider)
 
     assert result["stop_reason"] == "review_passed"
-    assert result["budget"]["usage"] == {"model_calls": 7, "executions": 2}
+    assert result["budget"]["usage"] == {"model_calls": 12, "executions": 2}
     contexts = [snapshot(messages) for messages in provider.messages]
-    known_definitions = contexts[1]["read_results"]
+    known_definitions = contexts[2]["read_results"]
     assert {item["tool"] for item in known_definitions} == {"load_skill", "query_operators"}
-    for context in contexts[2:]:
+    for context in contexts[3:]:
         retained = [item for item in context["read_results"] if item["tool"] in {"load_skill", "query_operators"}]
         assert retained == known_definitions
-    before_edit = next(item for item in contexts[4]["read_results"] if item["tool"] == "inspect_experiment")
-    after_conflict = next(item for item in contexts[5]["read_results"] if item["tool"] == "inspect_experiment")
+    before_edit = next(item for item in contexts[7]["read_results"] if item["tool"] == "inspect_experiment")
+    after_conflict = next(item for item in contexts[8]["read_results"] if item["tool"] == "inspect_experiment")
     assert before_edit == after_conflict
-    assert contexts[5]["last_error"]["code"] == "patch_conflict"
-    assert contexts[5]["current_draft"]["revision"] == contexts[4]["current_draft"]["revision"]
-    assert all(item["tool"] != "inspect_experiment" for item in contexts[6]["read_results"])
+    assert contexts[8]["last_tool_result"]["error"]["code"] == "patch_conflict"
+    assert contexts[8]["current_draft"]["revision"] == contexts[7]["current_draft"]["revision"]
+    # The independent reviewer starts from static definitions, not the Agent's crops.
+    assert all(item["tool"] != "inspect_experiment" for item in contexts[-1]["read_results"])
 
 
 def test_reference_pixels_descriptions_and_scope_reach_proposal_and_review(target, tmp_path):
@@ -203,7 +230,7 @@ def test_reference_pixels_descriptions_and_scope_reach_proposal_and_review(targe
         Image.new("RGB", (20 + index, 18 + index), color).save(path)
         examples.append({"image_path": str(path), "description": f"Reference semantic example {index}"})
     original = deepcopy(examples)
-    provider = ScriptedProvider([proposal(), review()])
+    provider = ScriptedProvider([*attempt(proposal()), review()])
 
     result = run(target, provider, reference_examples=examples)
 

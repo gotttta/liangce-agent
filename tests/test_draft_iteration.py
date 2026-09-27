@@ -229,26 +229,6 @@ def test_generated_code_repair_runs_once_in_real_docker(tmp_path, docker_sandbox
     assert result['data']['facts']['coverage'] == pytest.approx(100 / 1024, abs=1e-5)
 
 
-def test_submission_does_not_bypass_formal_visual_review(session, tmp_path):
-    from core.agent_graph import run_agent_graph
-    save_task(session)
-    experiment_id = execute(session)
-    assert call(session, 'submit_experiment', experiment_id=experiment_id, reason='review')['status'] == 'success'
-    class RejectingReviewer:
-        calls = 0
-        def review_candidates(self, target, description, candidates, **kwargs):
-            self.calls += 1
-            return {'decision': 'revise', 'selected_candidate': candidates[0]['name'],
-                    'reason': 'Boundary still wrong', 'observed_issues': ['Boundary still wrong']}
-    reviewer = RejectingReviewer()
-    result = run_agent_graph(session.target, session.description, output_root=tmp_path / 'formal',
-                             understanding=session.submitted, provider=reviewer, max_auto_revisions=0)
-    assert reviewer.calls == 1
-    assert not result['review']['acceptance']['overall_passed']
-    assert result.get('verified_baseline') is None
-    assert result['status'] == 'needs_human_review'
-
-
 def test_malformed_tool_json_returns_parse_location_and_can_retry(session):
     seen = []
     def complete(messages, specs, final_only):

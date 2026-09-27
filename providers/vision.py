@@ -269,6 +269,31 @@ class MockVisionProvider:
             "notes": ["Mock provider used; no remote multimodal model was called."],
         })
 
+    def agent_action(self, target_image_path, description, context=None, reference_examples=None):
+        """Deterministic v2 tool loop: draft, execute, then submit the newest experiment."""
+        from core.pipelines.dsl import strategy_to_pipeline
+        context = context or {}
+        experiments = context.get("experiment_summaries") or []
+        draft = context.get("current_draft")
+        if experiments and (context.get("last_tool_result") or {}).get("tool") == "execute_pipeline":
+            return {"kind": "tool", "tool": "submit_experiment", "arguments": {
+                "experiment_id": experiments[-1]["experiment_id"],
+                "reason": "Mock provider submits the executed draft for review"}}
+        if draft:
+            return {"kind": "tool", "tool": "execute_pipeline", "arguments": {
+                "draft_id": draft["draft_id"], "revision": draft["revision"]}}
+        understanding = self.understand_task(target_image_path, description)
+        arguments = {"pipeline": strategy_to_pipeline(understanding["recommended_strategy"]),
+                     "change_reason": "Mock provider threshold baseline"}
+        if not context.get("task_contract"):
+            arguments["understanding"] = understanding
+        return {"kind": "tool", "tool": "create_draft", "arguments": arguments}
+
+    def review_action(self, target_image_path, description, candidates,
+                      acceptance_criteria=None, context=None, reference_examples=None):
+        return {"kind": "review", "review": self.review_candidates(
+            target_image_path, description, candidates, reference_examples, acceptance_criteria)}
+
     def review_candidates(
         self,
         target_image_path,
@@ -286,22 +311,6 @@ class MockVisionProvider:
             "reason": "Mock provider 选择首个可执行候选；需要用户检查视觉准确性。",
             "observed_issues": [],
         }
-
-
-class FixedStrategyProvider:
-    """Expose an already-approved strategy through the graph provider contract."""
-
-    def __init__(self, strategy):
-        self.strategy = normalize_strategy(strategy)
-
-    def create_strategy(
-        self,
-        target_image_path,
-        description,
-        reference_annotation_path=None,
-        previous_state=None,
-    ):
-        return self.strategy
 
 
 class AliyunVisionProvider:
@@ -329,14 +338,6 @@ class AliyunVisionProvider:
         self.max_retries = int(NODE_MAX_RETRIES if max_retries is None else max_retries)
         if not self.api_key:
             raise ValueError("Missing ALIYUN_API_KEY or DASHSCOPE_API_KEY")
-
-    @logged_operation("propose_action")
-    def propose_action(self, target_image_path, description, context=None, reference_examples=None):
-        messages = build_action_messages(
-            target_image_path, description, context=context, reference_examples=reference_examples,
-        )
-        raw = extract_json_object(self._complete_action(messages))
-        return normalize_model_action(raw, description=description, context=context)
 
     @logged_operation("agent_decision")
     def agent_action(self, target_image_path, description, context=None, reference_examples=None):
