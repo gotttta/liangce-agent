@@ -76,6 +76,7 @@ class TaskSummaryOut(BaseModel):
     created_at: str
     updated_at: str
     running: bool
+    active_run_id: str | None = None   # RunManager 里的活动运行（latest_run_id 落盘前的窗口）
     sample_count: int
 
 

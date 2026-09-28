@@ -1,18 +1,198 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { api } from "@/api/client";
+import { subscribeRunEvents } from "@/api/sse";
+import { Composer, type TargetType } from "@/components/composer/Composer";
+import { Timeline } from "@/components/timeline/Timeline";
+import type { ReviewAction } from "@/components/timeline/ReviewCard";
 import { TopBar } from "@/components/layout/TopBar";
-import { formatTimestamp } from "@/lib/format";
+import { useUiStore } from "@/store/ui";
+import { groupTimeline, useTimelineStore } from "@/store/timeline";
 
-// 阶段 5 接入时间线与 Composer 前的任务页骨架：标题栏 + 样本图预览
+interface ManualRun {
+  taskId: string;
+  runId: string;
+}
+
+// 任务页数据流（计划 §9.8）：
+//   任务详情 → 逐个回放历史 run 的持久化事件 → 重建时间线；
+//   最新 run 在运行时订阅 SSE，断线由 EventSource 自动重连；
+//   发送消息 / 提交决策后（重）开同一 run 的 SSE。
 export function TaskPage() {
   const { taskId } = useParams();
+  const queryClient = useQueryClient();
+  const setRightPanel = useUiStore((state) => state.setRightPanel);
+
   const task = useQuery({
     queryKey: ["task", taskId],
     queryFn: () => api.getTask(taskId!),
     enabled: Boolean(taskId),
     refetchInterval: 5_000,
   });
+
+  const items = useTimelineStore((state) => state.items);
+  const runStatus = useTimelineStore((state) => state.runStatus);
+  const beginTask = useTimelineStore((state) => state.beginTask);
+  const pushEvent = useTimelineStore((state) => state.pushEvent);
+
+  const loadedRuns = useRef<Set<string>>(new Set());
+  // manual：本页发起的 start / review 接管的 run；server：任务详情报告的运行中 run
+  const [manual, setManual] = useState<ManualRun | null>(null);
+  const [sseEpoch, setSseEpoch] = useState(0);
+  const [uploading, setUploading] = useState<string[]>([]);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // 切换任务时丢弃旧任务的 manual 接管（渲染期状态调整，避免 effect 里 setState）
+  if (manual && manual.taskId !== taskId) setManual(null);
+
+  const manualRunId = manual && manual.taskId === taskId ? manual.runId : null;
+  // latest_run_id 要到第一次 human_gate 才落盘，运行窗口内以 active_run_id 为准
+  const serverRunId = task.data?.running
+    ? (task.data.active_run_id ?? task.data.latest_run_id)
+    : null;
+  const liveRunId = manualRunId ?? serverRunId;
+  // 服务器“运行中”可能滞后于事件流：时间线里已有终态的 run 不算运行
+  const running = manualRunId !== null || (serverRunId !== null && !(serverRunId in runStatus));
+
+  useEffect(() => {
+    if (!taskId) return;
+    loadedRuns.current = new Set();
+    beginTask(taskId);
+  }, [taskId, beginTask]);
+
+  // 历史回放：对任务详情里出现的每个 run 拉快照重放（按顺序 await，保证 run 顺序）
+  useEffect(() => {
+    if (!taskId || !task.data) return;
+    let cancelled = false;
+    const replay = async () => {
+      for (const run of task.data!.runs) {
+        if (cancelled || loadedRuns.current.has(run.run_id)) continue;
+        loadedRuns.current.add(run.run_id);
+        try {
+          const snapshot = await api.getRunSnapshot(taskId, run.run_id);
+          if (cancelled) return;
+          const events = [...snapshot.events].sort((a, b) => a.seq - b.seq);
+          const store = useTimelineStore.getState();
+          if (store.taskId !== taskId) return;
+          for (const event of events) pushEvent(event);
+        } catch {
+          // 旧版任务没有 stream.jsonl：跳过（详见 issues 文档）
+        }
+      }
+    };
+    void replay();
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, task.data, pushEvent]);
+
+  // 实时流：liveRunId 变化（或提交决策强制重开）时（重新）订阅；
+  // after 取该 run 已处理的最大 seq，重连补发由 reducer 按 seq 判重兜底。
+  useEffect(() => {
+    if (!taskId || !liveRunId) return;
+    const after = useTimelineStore.getState().lastSeqByRun[liveRunId] ?? 0;
+    let disposed = false;
+    const close = subscribeRunEvents(taskId, liveRunId, after, {
+      onEvent: (event) => {
+        const store = useTimelineStore.getState();
+        if (store.taskId !== taskId) return;
+        store.pushEvent(event);
+      },
+      onEnd: () => {
+        if (disposed) return;
+        setManual(null);
+        void queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+        void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      },
+    });
+    return () => {
+      disposed = true;
+      close();
+    };
+  }, [taskId, liveRunId, sseEpoch, queryClient]);
+
+  const invalidateTask = useCallback(() => {
+    if (!taskId) return;
+    void queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+    void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+  }, [queryClient, taskId]);
+
+  const startRun = useCallback(
+    async (message: string, targetType: TargetType) => {
+      if (!taskId) throw new Error("未选择任务");
+      const { run_id } = await api.startRun(taskId, message, targetType);
+      loadedRuns.current.add(run_id);
+      setManual({ taskId, runId: run_id });
+      invalidateTask();
+    },
+    [taskId, invalidateTask],
+  );
+
+  const submitReview = useCallback(
+    async (runId: string, action: ReviewAction, feedback?: string) => {
+      if (!taskId) return;
+      await api.submitReview(taskId, runId, action, feedback);
+      // 决策后事件继续落在同一个 run 的事件流上：重开 SSE 继续接收
+      setManual({ taskId, runId });
+      setSseEpoch((epoch) => epoch + 1);
+      invalidateTask();
+    },
+    [taskId, invalidateTask],
+  );
+
+  const cancelRun = useCallback(() => {
+    if (!taskId || !liveRunId) return;
+    void api.cancelRun(taskId, liveRunId).catch(() => {
+      // 取消失败时保持 SSE：结束事件仍会到达
+    });
+  }, [taskId, liveRunId]);
+
+  const addFiles = useCallback(
+    (files: File[]) => {
+      if (!taskId || files.length === 0) return;
+      const names = files.map((file) => file.name);
+      setUploading((current) => [...current, ...names]);
+      setUploadError(null);
+      api
+        .addSamples(taskId, files)
+        .then(invalidateTask)
+        .catch((cause: unknown) => {
+          setUploadError(cause instanceof Error ? cause.message : "样本图上传失败");
+        })
+        .finally(() => {
+          setUploading((current) => current.filter((name) => !names.includes(name)));
+        });
+    },
+    [taskId, invalidateTask],
+  );
+
+  const removeSample = useMutation({
+    mutationFn: (name: string) => api.removeSample(taskId!, name),
+    onSuccess: invalidateTask,
+  });
+
+  const entries = useMemo(() => groupTimeline(items), [items]);
+
+  // 最近一个未处理的 review（所在 run 停在 awaiting_review）驱动输入区形态
+  const pendingReview = useMemo(() => {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.kind !== "review") continue;
+      if (!item.resolved && runStatus[item.runId] === "awaiting_review") return item;
+      return null;
+    }
+    return null;
+  }, [items, runStatus]);
+
+  // 每个 run 的原始任务描述（错误卡片“重试”用）
+  const messageByRun = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of items) {
+      if (item.kind === "user" && !(item.runId in map)) map[item.runId] = item.text;
+    }
+    return map;
+  }, [items]);
 
   if (task.isPending) {
     return <div className="p-8 text-sm text-muted-foreground">加载任务…</div>;
@@ -26,44 +206,50 @@ export function TaskPage() {
   }
 
   const detail = task.data;
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <TopBar task={detail} />
-      <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-6 py-8">
-          <p className="text-sm text-muted-foreground">
-            创建于 {formatTimestamp(detail.created_at)} · 样本 {detail.sample_count} 张
-          </p>
-          {detail.samples.length > 0 ? (
-            <section className="mt-6">
-              <h2 className="mb-2 text-sm font-medium">样本图</h2>
-              <div className="flex flex-wrap gap-3">
-                {detail.samples.map((sample) => (
-                  <a
-                    key={sample.name}
-                    href={sample.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block overflow-hidden rounded-lg border bg-background"
-                    title={sample.name}
-                  >
-                    <img
-                      src={sample.url}
-                      alt={sample.name}
-                      className="size-24 object-cover"
-                      loading="lazy"
-                    />
-                  </a>
-                ))}
-              </div>
-            </section>
-          ) : (
-            <p className="mt-8 rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-              上传样本图并描述检测目标后开始（输入区将在下一步提供）
-            </p>
-          )}
-        </div>
+      <main
+        className="min-h-0 flex-1"
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          addFiles(Array.from(event.dataTransfer.files));
+        }}
+      >
+        <Timeline
+          entries={entries}
+          messageByRun={messageByRun}
+          bestPipeline={detail.best?.pipeline ?? null}
+          onOpenArtifacts={() => setRightPanel(true)}
+          onReviewSubmit={submitReview}
+          onRetry={(message) => void startRun(message, "defect")}
+        />
       </main>
+      {uploadError && (
+        <p className="px-6 pb-1 text-xs text-red-600" role="alert">
+          {uploadError}
+        </p>
+      )}
+      <Composer
+        samples={detail.samples}
+        uploading={uploading}
+        hasRuns={detail.runs.length > 0}
+        running={running}
+        pendingReview={pendingReview}
+        onStart={startRun}
+        onReview={(feedback) => {
+          if (!pendingReview) throw new Error("没有待处理的确认");
+          return submitReview(pendingReview.runId, "continue", feedback);
+        }}
+        onCancel={cancelRun}
+        onAddFiles={addFiles}
+        onRemoveSample={(name) => removeSample.mutate(name)}
+      />
     </div>
   );
 }

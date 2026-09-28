@@ -32,6 +32,11 @@ def _is_running(request: Request, task_id: str) -> bool:
     return bool(runs and runs.is_running(task_id))
 
 
+def _active_run_id(request: Request, task_id: str) -> str | None:
+    runs = getattr(request.app.state, "runs", None)
+    return runs.active_run_id(task_id) if runs else None
+
+
 def _sample_out(sample: dict, roots: FileRoots) -> dict:
     return {
         "name": Path(sample.get("path", "")).name,
@@ -48,6 +53,7 @@ def _task_summary(request: Request, task: dict) -> dict:
         "created_at": task.get("created_at", ""),
         "updated_at": task.get("updated_at", ""),
         "running": _is_running(request, task["id"]),
+        "active_run_id": _active_run_id(request, task["id"]),
         "sample_count": len(task.get("samples") or []),
     }
 

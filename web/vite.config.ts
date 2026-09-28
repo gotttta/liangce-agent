@@ -13,14 +13,15 @@ export default defineConfig({
     },
   },
   server: {
-    // 开发模式不需要 CORS：/api 由 Vite 代理到本地 FastAPI（计划 §6.4）
+    // 开发模式不需要 CORS：/api 由 Vite 代理到本地 FastAPI（计划 §6.4）。
+    // LIANGCE_API_URL 用于指向别的本地实例（如验收用 fake 后端），默认 8765。
     proxy: {
-      "/api": "http://127.0.0.1:8765",
+      "/api": process.env.LIANGCE_API_URL ?? "http://127.0.0.1:8765",
     },
   },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/tests/setup.ts"],
-    include: ["src/tests/**/*.test.{ts,tsx}"],
+    include: ["src/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
   },
 });

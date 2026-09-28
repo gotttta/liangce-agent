@@ -1,4 +1,10 @@
-import type { Health, SampleOut, TaskDetail, TaskSummary } from "./types";
+import type {
+  Health,
+  RunSnapshot,
+  SampleOut,
+  TaskDetail,
+  TaskSummary,
+} from "./types";
 
 export class ApiError extends Error {
   readonly code: string;
@@ -65,4 +71,25 @@ export const api = {
       `/api/tasks/${taskId}/samples/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+  startRun: (taskId: string, message: string, targetType: string) =>
+    request<{ run_id: string }>(`/api/tasks/${taskId}/runs`, {
+      method: "POST",
+      body: JSON.stringify({ message, target_type: targetType }),
+    }),
+  submitReview: (
+    taskId: string,
+    runId: string,
+    action: string,
+    feedback?: string,
+  ) =>
+    request<{ ok: boolean }>(`/api/tasks/${taskId}/runs/${runId}/review`, {
+      method: "POST",
+      body: JSON.stringify({ action, feedback: feedback ?? null }),
+    }),
+  cancelRun: (taskId: string, runId: string) =>
+    request<{ ok: boolean }>(`/api/tasks/${taskId}/runs/${runId}/cancel`, {
+      method: "POST",
+    }),
+  getRunSnapshot: (taskId: string, runId: string) =>
+    request<RunSnapshot>(`/api/tasks/${taskId}/runs/${runId}`),
 };

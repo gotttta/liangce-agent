@@ -49,3 +49,41 @@ export function formatScore(value: number): string {
   if (!Number.isFinite(value)) return "—";
   return value.toFixed(3);
 }
+
+// 停止原因中文说明（计划 §9.4）
+export const STOP_REASON_LABELS: Record<string, string> = {
+  target_reached: "达到目标分数",
+  no_improvement: "连续多轮没有明显提升",
+  max_iterations: "达到迭代上限",
+  user_exited: "用户已结束",
+};
+
+export function stopReasonLabel(reason: string | null | undefined): string {
+  if (!reason) return "";
+  return STOP_REASON_LABELS[reason] ?? reason;
+}
+
+// 运行终态的中文名（run_finished.status，计划 §12.2：运行状态以此为准）
+export const RUN_STATUS_LABELS: Record<string, string> = {
+  completed: "已完成",
+  awaiting_review: "待确认",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+export function runStatusLabel(status: string): string {
+  return RUN_STATUS_LABELS[status] ?? status;
+}
+
+/** 算子序列一行摘要：normalize → clahe → adaptive_threshold */
+export function formatPipeline(pipeline: Record<string, unknown>[]): string {
+  return pipeline
+    .map((step) => String(step.op ?? "?"))
+    .join(" → ");
+}
+
+export function formatTokens(usage: Record<string, number> | null | undefined): string {
+  const total = usage?.total_tokens;
+  if (typeof total !== "number" || !Number.isFinite(total)) return "";
+  return `${total.toLocaleString("zh-CN")} tokens`;
+}

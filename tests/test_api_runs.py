@@ -41,6 +41,7 @@ class FakeFlows:
         self.start_calls = []
         self.resume_calls = []
         self.gate = threading.Event()      # set 后 start 才继续（busy/cancel 测试用）
+        self.resume_gate = None            # set 后 resume 才开始发事件（订阅时机测试用）
         self.start_raises = None
         self.overlay = root / "outputs" / "run_overlay.png"
         self.overlay.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,8 @@ class FakeFlows:
 
     def resume(self, **kwargs):
         self.resume_calls.append(kwargs)
+        if self.resume_gate is not None:
+            self.resume_gate.wait(timeout=30)
         emit_node_start("iterate", "提出算子序列调整")
         emit_node_complete("iterate", 0.4, {"pipeline_length": 3})
         return {"run_status": "completed", "best_score": 0.9}
@@ -114,7 +117,9 @@ def _collect_events(client, task_id, run_id, after=None):
                 continue
             buffer.append(line)
             if line.startswith("data: "):
-                events.append(json.loads(line[len("data: "):]))
+                parsed = json.loads(line[len("data: "):])
+                if parsed.get("type"):          # end 帧的 data: {} 不计入事件
+                    events.append(parsed)
             if line == "event: end":
                 break
     return events
@@ -186,6 +191,10 @@ def test_second_start_while_running_returns_409(tmp_path, env):
     run_id = env.client.post(f"/api/tasks/{env.task['id']}/runs",
                              json={"message": "第一次"}).json()["run_id"]
     try:
+        # 运行中：任务详情暴露活动 run（latest_run_id 落盘前的刷新恢复窗口）
+        detail = env.client.get(f"/api/tasks/{env.task['id']}").json()
+        assert detail["running"] is True
+        assert detail["active_run_id"] == run_id
         response = env.client.post(f"/api/tasks/{env.task['id']}/runs",
                                    json={"message": "第二次"})
         assert response.status_code == 409
@@ -196,6 +205,9 @@ def test_second_start_while_running_returns_409(tmp_path, env):
     finally:
         env.flows.gate.set()
         _wait_finished(env.client, env.task["id"], run_id)
+    detail = env.client.get(f"/api/tasks/{env.task['id']}").json()
+    assert detail["running"] is False
+    assert detail["active_run_id"] is None
 
 
 def test_cancel_produces_cancelled_finish(tmp_path, env):
@@ -267,6 +279,50 @@ def test_resume_continues_seq_on_same_stream(tmp_path, env):
     resume_call = env.flows.resume_calls[0]
     assert resume_call["thread_id"] == run_id
     assert resume_call["response"] == {"action": "continue", "feedback": "边界偏小"}
+
+
+def test_subscribe_during_resumed_segment_keeps_streaming(tmp_path, env):
+    """决策后立刻重开 SSE（前端行为）：resume 段进行中不能提前收到 end。
+
+    回归：resume 曾忘记把 handle.finished 复位，重开的订阅会立刻收到
+    event: end，时间线在 resume 段中途断流。"""
+    env.flows.gate.set()
+    run_id = env.client.post(f"/api/tasks/{env.task['id']}/runs",
+                             json={"message": "找出亮块"}).json()["run_id"]
+    first = _wait_finished(env.client, env.task["id"], run_id)
+    last_seq = first["events"][-1]["seq"]
+
+    # resume 先卡在 gate 上：POST /review 返回后、事件尚未发出时完成订阅
+    env.flows.resume_gate = threading.Event()
+    assert env.client.post(f"/api/tasks/{env.task['id']}/runs/{run_id}/review",
+                           json={"action": "continue"}).status_code == 200
+
+    lines = []
+    reader = threading.Thread(
+        target=lambda: _read_stream_into(env.client, env.task["id"], run_id,
+                                         last_seq, lines),
+        daemon=True)
+    reader.start()
+    time.sleep(0.3)          # 确保订阅已经打开并处于等待
+    env.flows.resume_gate.set()
+    reader.join(timeout=10)
+
+    events = [json.loads(line[len("data: "):]) for line in lines
+              if line.startswith("data: ") and line != "data: {}"]
+    assert events, "resume 段没有收到任何事件（订阅被提前 end 掐断）"
+    assert events[0]["type"] == "run_started" and events[0]["seq"] == last_seq + 1
+    assert events[-1]["type"] == "run_finished" and events[-1]["status"] == "completed"
+    assert lines[-1] == "event: end"
+
+
+def _read_stream_into(client, task_id, run_id, after, lines):
+    with client.stream("GET",
+                       f"/api/tasks/{task_id}/runs/{run_id}/events",
+                       params={"after": after}) as response:
+        for line in response.iter_lines():
+            lines.append(line)
+            if line == "event: end":
+                break
 
 
 def test_runner_exception_maps_to_error_and_failed(tmp_path, env):

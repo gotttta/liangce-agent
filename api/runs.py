@@ -110,6 +110,8 @@ class RunManager:
                 raise TaskBusyError(f"task {task_id} already has an active runner")
             handle = self._get_or_restore_locked(task_id, run_id)
             handle.status = "running"
+            # 上一段结束时 finished=True；resume 段期间订阅必须继续跟随而不是立刻收 end
+            handle.finished = False
             self._active[task_id] = run_id
         self._spawn(task_id, run_id, SimpleNamespace(
             kind="resume", action=action, feedback=feedback or ""))
@@ -127,6 +129,14 @@ class RunManager:
         with self._lock:
             self._sweep_locked()
             return task_id in self._active
+
+    def active_run_id(self, task_id: str) -> str | None:
+        """任务当前活动运行的 run_id。
+
+        latest_run_id 要到第一次 human_gate 中断（save_run_state）才落盘，
+        首个节点尚未中断时刷新页面只能靠它找到实时流。"""
+        with self._lock:
+            return self._active.get(task_id)
 
     def subscribe(self, task_id: str, run_id: str, after_seq: int = 0):
         """返回 SSE 生成器；先补发 seq > after_seq 的历史，再跟随实时，结束发 end。"""
@@ -395,4 +405,5 @@ class RunManager:
             for event in events:
                 cursor = event["seq"]
                 yield sse_frame(event)
-        yield "event: end\n\n"
+        # SSE 规范：data 为空的事件浏览器不会派发，end 帧必须带 data
+        yield "event: end\ndata: {}\n\n"
