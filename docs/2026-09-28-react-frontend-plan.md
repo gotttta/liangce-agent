@@ -235,6 +235,8 @@ if interrupts:
     result["interrupt"] = _serialize_interrupts(interrupts)
 ```
 
+同时给 `resume_agent_graph` 增加关键字参数 `provider=None` 并透传给 `build_agent_graph`。**已核实**（2026-09-28 阶段 1 测试暴露）：resume 重建执行图时如果不带 provider，继续迭代进入 `iterate` 节点会直接 `'NoneType' object has no attribute '_complete_action'` 崩溃；旧 Gradio 只走 accept/exit 所以从未触发。API 层（第 7 节 RunManager）调用 resume 时必须传 `provider=build_runtime_provider()`。
+
 加测试：resume 后停在下一个 human_gate 时，返回值包含 `interrupt`，且 `value.stage` 正确（reference / final）。
 
 ### 5.5 验证
@@ -680,6 +682,7 @@ TaskPage 挂载
 4. **旧 checkpoint**：`_require_current_checkpoint` 遇到 v2 的 checkpoint 会抛 `OLD_CHECKPOINT_MESSAGE`，API 映射为 400，前端显示该文案。
 5. **一个进程只允许一个 API 实例**（`task_lock` 是 fcntl 文件锁，可以跨进程，但 RunManager 的内存状态不共享）。文档里注明不要同时开两个 `python -m api`。
 6. 遇到本文档没有覆盖的情况，记到 `docs/2026-09-28-react-frontend-issues.md`，格式：`- [阶段N] 问题描述 / 我的临时处理 / 需要确认的点`。
+7. **`tools/gen_reference.py` 的默认 root 不再被读取**：参考掩膜按任务隔离（5.1）后，离线生成工具必须显式传 `--workspace workspace/tasks/<task_id>/reference_masks`，写到全局 `workspace/references` 的产物不会再被任何运行消费；存量全局目录保留但成为死数据。
 
 ---
 
