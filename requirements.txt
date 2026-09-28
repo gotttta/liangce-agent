@@ -7,4 +7,8 @@ openai
 gradio<6
 huggingface-hub<1.0
 
+fastapi
+uvicorn[standard]
+python-multipart
+
 langgraph-checkpoint-sqlite==3.0.3
