@@ -18,7 +18,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 from skimage.measure import label as label_instances
 
-from core.agent_events import emit_node_complete, emit_node_start
+from core.agent_events import emit_event, emit_node_complete, emit_node_start
 from core.iteration_tracker import IterationTracker
 from core.pipelines.dsl import execute_pipeline, pipeline_operator_catalog
 from core.reference_store import ReferenceStore
@@ -186,6 +186,14 @@ class WorkflowRuntime:
         overlay_path = candidate_dir / f"{image_id}.png"
         np.save(mask_path, merged)
         cv2.imwrite(str(overlay_path), _tint(image, merged, (0, 255, 0)))
+        emit_event({
+            "type": "reference_candidate",
+            "image_id": image_id,
+            "overlay_path": str(overlay_path),
+            "sam_score": mean_score,
+            "low_quality": mean_score < MIN_MEAN_IOU,
+            "timestamp": time.time(),
+        })
         quality_note = "" if mean_score >= MIN_MEAN_IOU else \
             f"（SAM 分数 {mean_score:.2f} 低于 {MIN_MEAN_IOU}，分割质量存疑，将标记 skip_scoring）"
         message = (f"请确认 {image_id} 的参考掩膜：叠加图 {overlay_path}{quality_note}。"
@@ -277,6 +285,17 @@ class WorkflowRuntime:
         tracker = IterationTracker(Path(state.run_dir))
         tracker.record(run_score, {"pipeline": state.current_spec.pipeline,
                                    "notes": state.current_spec.notes})
+        emit_event({
+            "type": "iteration_scored",
+            "iteration": state.iteration,
+            "composite_mean": run_score.composite_mean,
+            "best_score_before": state.best_score,
+            "improved": run_score.composite_mean > state.best_score,
+            "pipeline": state.current_spec.pipeline,
+            "notes": state.current_spec.notes,
+            "image_scores": [asdict(item) for item in run_score.image_scores],
+            "timestamp": time.time(),
+        })
         state = replace(state, last_run_score=run_score)
         if run_score.composite_mean > state.best_score:
             emit_node_complete("score", time.monotonic() - started,

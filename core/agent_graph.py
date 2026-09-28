@@ -37,11 +37,12 @@ OLD_CHECKPOINT_MESSAGE = '该运行来自已停用的旧版工作流，无法继
 WORKFLOW_STEP_LIMIT = 512
 
 
-def build_agent_graph(provider=None, algorithm_registry=None, checkpointer=None):
+def build_agent_graph(provider=None, algorithm_registry=None, checkpointer=None,
+                      references_root=None):
     from core.agent_workflow import build_workflow_graph
     return build_workflow_graph(
         provider, None if checkpointer is False else checkpointer or _CHECKPOINTER or get_checkpointer(),
-        algorithm_registry=algorithm_registry)
+        algorithm_registry=algorithm_registry, references_root=references_root)
 
 
 def _require_current_checkpoint(saved):
@@ -130,12 +131,17 @@ def run_agent_graph(
     memory_context=None,
     task_store=None,
     task_id=None,
+    target_image_paths=None,
+    target_type="defect",
 ):
     run_started = time.monotonic()
     graph_thread_id = thread_id or f"agent_{uuid4().hex}"
+    image_paths = [str(path) for path in
+                   (target_image_paths if target_image_paths is not None else [target_image_path])]
     if memory_context is None:
         task_store = task_store or TaskStore(Path(output_root).parent / "workspace" / "tasks")
         algorithm_registry = algorithm_registry or task_store.algorithm_registry
+    # 读 checkpoint / state 不执行节点，先用默认图探测；执行前按任务目录重建。
     graph = build_agent_graph(provider=provider, algorithm_registry=algorithm_registry)
     config = {"configurable": {"thread_id": graph_thread_id}}
     _require_current_checkpoint(graph.checkpointer.get_tuple(config) if graph.checkpointer else None)
@@ -143,7 +149,7 @@ def run_agent_graph(
     restoring = bool(snapshot.values)
     if restoring:
         saved = restore_state(snapshot.values)
-        if (list(saved.image_paths or []) != [str(target_image_path)]
+        if (list(saved.image_paths or []) != image_paths
                 or saved.task != description):
             raise ValueError("Existing graph thread belongs to a different input")
         interrupts = _pending_interrupts(graph, config)
@@ -168,9 +174,13 @@ def run_agent_graph(
             task_id, description, target_image_path, previous_state)
         task_store.append_message(task_id, "user", description)
     bind_context(task_id=memory_context.get("task_id") or task_id or "-")
+    # 参考掩膜按任务隔离：references_root 必须等权威 task_store/task_id 确定后再定。
+    graph = build_agent_graph(provider=provider, algorithm_registry=algorithm_registry,
+                              references_root=task_store.task_dir(task_id) / "reference_masks")
     initial_state = WorkflowState(
-        image_paths=[str(target_image_path)],
+        image_paths=image_paths,
         task=description,
+        target_type=target_type,
         run_id=graph_thread_id,
         output_root=str(output_root),
         task_id=task_id or "",
@@ -233,11 +243,11 @@ def _record_run_failure(graph, config, error):
 
 
 @logged_operation("resume_agent_graph")
-def resume_agent_graph(thread_id, response, event_callback=None):
+def resume_agent_graph(thread_id, response, event_callback=None, provider=None):
     """Resume a paused human-gate node without re-running earlier nodes."""
     if not thread_id:
         raise ValueError("缺少 Agent thread ID，无法恢复工作流")
-    graph = build_agent_graph()
+    graph = build_agent_graph(provider=provider)
     _require_current_checkpoint(graph.checkpointer.get_tuple({'configurable': {'thread_id': thread_id}}))
     snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
     if not snapshot.values:
@@ -251,6 +261,10 @@ def resume_agent_graph(thread_id, response, event_callback=None):
         task_id = saved.task_id or thread_id
         root = context.get('task_root') or Path('outputs').parent / 'workspace' / 'tasks'
         with task_lock(root, task_id):
+            # 参考掩膜按任务隔离：读 state 已用默认图完成，执行节点前按任务目录重建。
+            graph = build_agent_graph(
+                provider=provider,
+                references_root=TaskStore(root).task_dir(task_id) / "reference_masks")
             config = {"configurable": {"thread_id": thread_id},
                       'recursion_limit': WORKFLOW_STEP_LIMIT}
             snapshot = graph.get_state(config)
@@ -262,9 +276,11 @@ def resume_agent_graph(thread_id, response, event_callback=None):
                 raise ValueError('工作流尚未到人工确认阶段，请先恢复运行')
             graph.invoke(Command(resume=response), config=config, durability='sync')
             snapshot = graph.get_state(config)
-            result = _public_state(snapshot.values,
-                                   interrupted=bool(_pending_interrupts(graph, config)))
+            interrupts = _pending_interrupts(graph, config)
+            result = _public_state(snapshot.values, interrupted=bool(interrupts))
             store.save_run_state(task_id, result)
+            if interrupts:
+                result["interrupt"] = _serialize_interrupts(interrupts)
     finally:
         if event_callback:
             unregister_event_listener(event_callback)
