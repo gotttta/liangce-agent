@@ -15,3 +15,7 @@ workspace/
 
 tmp/
 .zcode/
+
+# 前端
+web/node_modules/
+web/dist/
