@@ -34,7 +34,8 @@ def _error(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse(status_code=status, content=body.model_dump())
 
 
-def create_app(root: Path | None = None) -> FastAPI:
+def create_app(root: Path | None = None, run_fn=None, resume_fn=None,
+               provider_factory=None) -> FastAPI:
     base = Path(root).resolve() if root is not None else config.ROOT
     app = FastAPI(title="liangce-agent", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.paths = SimpleNamespace(
@@ -46,7 +47,18 @@ def create_app(root: Path | None = None) -> FastAPI:
     from core.task_store import TaskStore
 
     app.state.tasks = TaskStore(app.state.paths.task_root)
+
+    from api.files import file_roots
+    from api.runs import RunManager
+    from api.routes import runs as runs_route
+
+    app.state.runs = RunManager(task_store=app.state.tasks,
+                                output_root=app.state.paths.output_root,
+                                roots=file_roots(base),
+                                run_fn=run_fn, resume_fn=resume_fn,
+                                provider_factory=provider_factory)
     app.include_router(tasks.router, prefix="/api")
+    app.include_router(runs_route.router, prefix="/api")
     app.include_router(artifacts.router, prefix="/api")
 
     @app.get("/api/health", response_model=HealthOut)

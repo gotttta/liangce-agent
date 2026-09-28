@@ -158,7 +158,11 @@ def patch_task(request: Request, task_id: str, payload: TaskPatchRequest):
 
 @router.delete("/tasks/{task_id}")
 def delete_task(request: Request, task_id: str):
+    from core.orchestration_runtime import TaskBusyError
+
     _store(request).load_task(task_id)
+    if _is_running(request, task_id):
+        raise TaskBusyError(f"task {task_id} already has an active runner")
     _store(request).delete_task(task_id)
     return {"ok": True}
 
