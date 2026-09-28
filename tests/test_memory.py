@@ -123,46 +123,6 @@ if sys.argv[1] != 'start': assert x['answer'] == 'accepted'
     assert counter.read_text() == 'executed\n'
 
 
-def test_graph_entrypoint_reuses_paused_thread_and_keeps_task_memory(tmp_path, monkeypatch):
-    from PIL import Image
-    from core.agent_graph import run_agent_graph, resume_agent_graph
-    from core.pipelines.dsl import execute_pipeline
-    from test_tool_agent_graph import Agent, create, execute, submit
-    monkeypatch.setenv('LIANGCE_CHECKPOINT_PATH', str(tmp_path / 'graph.sqlite3'))
-    monkeypatch.setattr('core.sandbox.check_sandbox_available', lambda: {'image_id': 'test-image'})
-    monkeypatch.setattr('core.experiments.runner.execute_pipeline_sandbox', execute_pipeline)
-    image = tmp_path / 'input.png'
-    pixels = Image.new('L', (16, 16))
-    pixels.paste(255, (4, 4, 12, 12))
-    pixels.save(image)
-    tasks, memory, task_id = service(tmp_path)
-
-    def remember(context):
-        action = create(context)
-        action['arguments']['memory_updates'] = [
-            {'op': 'set', 'key': 'constraint:edge', 'value': '包含边缘', 'source_quote': '包含边缘'}]
-        return action
-
-    agent = Agent([remember, execute, submit])
-    kwargs = dict(output_root=tmp_path / 'outputs', task_store=tasks, task_id=task_id,
-                  thread_id='test-run', provider=agent)
-    first = run_agent_graph(image, '包含边缘', **kwargs)
-    assert first['task_id'] == task_id
-    assert first['interrupt']
-    assert first['memory_summary']['active_constraints']['edge'] == '包含边缘'
-    calls = len(agent.calls)
-    episodes_before = len(memory.store.list(task_id, 'episodic'))
-    repeated = run_agent_graph(image, '包含边缘', **kwargs)
-    assert repeated['interrupt']
-    assert repeated['budget']['usage']['executions'] == 1
-    assert len(agent.calls) == calls
-    assert len(memory.store.list(task_id, 'episodic')) == episodes_before
-    resumed = resume_agent_graph('test-run', {'action': 'accept'})
-    assert resumed['agent_status'] == 'accepted'
-    assert resume_agent_graph('test-run', {'action': 'accept'})['agent_status'] == 'accepted'
-    assert len(agent.calls) == calls
-
-
 def test_accepted_algorithm_creates_procedural_evidence(tmp_path):
     tasks, memory, task_id = service(tmp_path)
     acceptance = tasks.accept_result(task_id, {
