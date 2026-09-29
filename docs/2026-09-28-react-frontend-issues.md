@@ -16,7 +16,13 @@
 
 - [阶段6] `ReferenceGallery` 曾把 `state.items.filter(...)` 的派生数组直接写进 zustand selector：每次渲染新引用 → useSyncExternalStore 快照不稳定 → 无限重渲染，首个时间线事件到达时整棵 React 树崩溃（root 清空、SSE 断开，真实浏览器验收触发）。/ 已修：selector 只取 `state.items` 稳定引用，过滤放 `useMemo`。/ 已排查全部 selector，无同类问题。
 
-- [阶段6] core 的轮次编号两套口径：事件流 `iteration_scored.iteration` 从 1 开始（`iterate` 节点先 `state.iteration + 1` 再打分），`iteration_history.jsonl` 按行计数从 0 开始，同一轮在时间线和产物面板里差 1。/ 前端在 ScoreChart 展示层 +1 对齐时间线文案。/ core 侧统一编号（tracker.record 改用 `state.iteration`）属于 core 行为改动，只记录不修。
+- [阶段6] core 的轮次编号两套口径：事件流 `iteration_scored.iteration` 从 1 开始（`iterate` 节点先 `state.iteration + 1` 再打分），`iteration_history.jsonl` 按行计数从 0 开始，同一轮在时间线和产物面板里差 1。/ 前端在 ScoreChart 展示层 +1 对齐时间线文案。/ **审查已确认**：展示层对齐即可，core 暂时不动。
+
+- [阶段6] 参考叠加图只从当前 run 目录（`outputs/<run_id>/reference_candidate/`）找：新一轮运行里，上一轮已确认的参考在产物面板会显示成没有叠加图（只有原图和状态）。/ 第一版接受（审查确认）。/ 后续可让 artifacts 接口在当前 run 找不到叠加图时回退扫历史 run 目录，或确认参考时把叠加图复制进任务目录——属接口行为选择，暂不做。
+
+- [阶段6] 阶段 5/6 验收截图（约 1.4 MB 二进制）已随 commit 进仓库。/ 后续阶段不再提交截图，改附在 PR 描述里；已入库的暂不删除（历史提交里仍占体积，删除无益）。/ 无需确认。
+
+- [阶段5] §12.3 的旧任务回放：**已决策（阶段 6 审查）**——接受旧任务（只有 Gradio 时代 `conversation.jsonl` 的 v2 任务）在新界面显示为空时间线，不补只读接口；阶段 7 删除 `ui/` 的清单里注明这一点。
 
 - [阶段6] 验收用 fake 后端（tests/fixtures/serve_fake_backend.py）需要产物数据：已让它复用真实 `TaskStore.save_run_state` / `ReferenceStore` / `IterationTracker` 落盘，与真实链路同构；不涉及产品代码。
 

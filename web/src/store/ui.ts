@@ -13,7 +13,7 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   // 窄屏初次加载时产物面板是抽屉，默认收起（宽屏默认展开）
   rightPanelOpen:
-    typeof window !== "undefined"
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
       ? window.matchMedia("(min-width: 1024px)").matches
       : true,
   toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),

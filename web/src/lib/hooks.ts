@@ -4,7 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 // 值不一致时在渲染期调整（React 官方模式），变更事件里才走 setState。
 export function useMediaQuery(query: string): boolean {
   const media = useMemo(
-    () => (typeof window === "undefined" ? null : window.matchMedia(query)),
+    () =>
+      typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia(query)
+        : null,
     [query],
   );
   const [matches, setMatches] = useState(() => media?.matches ?? false);

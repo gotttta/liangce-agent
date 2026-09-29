@@ -21,17 +21,25 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { statusDotClass } from "@/lib/status";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useUiStore } from "@/store/ui";
 import { cn } from "@/lib/utils";
 
 function TaskRow({ task }: { task: TaskSummary }) {
   const { taskId } = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const setSidebarOpen = useUiStore((state) => state.setSidebarOpen);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.title);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const active = taskId === task.id;
+
+  // 窄屏下侧栏是抽屉：导航后收起，避免挡住内容（审查建议）
+  const openTask = () => {
+    navigate(`/tasks/${task.id}`);
+    setSidebarOpen(false);
+  };
 
   const rename = useMutation({
     mutationFn: (title: string) => api.patchTask(task.id, title),
@@ -45,6 +53,7 @@ function TaskRow({ task }: { task: TaskSummary }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       if (active) navigate("/");
+      setSidebarOpen(false);
     },
   });
 
@@ -72,7 +81,7 @@ function TaskRow({ task }: { task: TaskSummary }) {
     >
       <button
         type="button"
-        onClick={() => navigate(`/tasks/${task.id}`)}
+        onClick={openTask}
         className="flex min-w-0 flex-1 items-center gap-2 text-left"
       >
         <span
@@ -152,6 +161,7 @@ function TaskRow({ task }: { task: TaskSummary }) {
 export function Sidebar() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const setSidebarOpen = useUiStore((state) => state.setSidebarOpen);
   const tasks = useQuery({
     queryKey: ["tasks"],
     queryFn: () => api.listTasks(),
@@ -162,6 +172,7 @@ export function Sidebar() {
     onSuccess: (task) => {
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       navigate(`/tasks/${task.id}`);
+      setSidebarOpen(false);
     },
   });
 

@@ -47,6 +47,9 @@ export function TaskPage() {
   const [uploading, setUploading] = useState<string[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [replaying, setReplaying] = useState(false);
+  // 初始回放完成的任务 ID：回放没完成前不开 SSE，否则运行中一轮的实时事件
+  // 会插到旧运行前面，时间线顺序错乱（审查意见 #2）
+  const [replayDoneFor, setReplayDoneFor] = useState<string | null>(null);
   const artifactsTimer = useRef<number | null>(null);
 
   // 切换任务时丢弃旧任务的 manual 接管（渲染期状态调整，避免 effect 里 setState）
@@ -83,18 +86,27 @@ export function TaskPage() {
     beginTask(taskId);
   }, [taskId, beginTask]);
 
-  // 历史回放：对任务详情里出现的每个 run 拉快照重放（按顺序 await，保证 run 顺序）
+  // 历史回放：对任务详情里出现的每个 run 拉快照重放（按顺序 await，保证 run 顺序）。
+  // loadedRuns 只在事件推送成功后才标记：effect 被取消时未推送的 run 保持未标记，
+  // 下次 task.data 变化会重新回放，不会出现“已标记但没推送”的丢数据（审查意见 #2）。
+  // 当前活动 run 跳过快照回放，其历史由 SSE 以 after=0 补齐——避免回放和实时流
+  // 双通道向同一 run 交错推送（reducer 按 seq 判重时晚到的旧 seq 会被丢弃）。
   useEffect(() => {
     if (!taskId || !task.data) return;
-    const pending = task.data.runs.filter((run) => !loadedRuns.current.has(run.run_id));
-    if (pending.length === 0) return;
+    const pending = task.data.runs.filter(
+      (run) => !loadedRuns.current.has(run.run_id) && run.run_id !== liveRunId,
+    );
+    if (pending.length === 0) {
+      // 没有需要回放的 run：初始回放视为完成，放行 SSE
+      setReplayDoneFor(taskId);
+      return;
+    }
     let cancelled = false;
     setReplaying(true);
     const replay = async () => {
       let sawArtifactEvent = false;
       for (const run of pending) {
         if (cancelled || loadedRuns.current.has(run.run_id)) continue;
-        loadedRuns.current.add(run.run_id);
         try {
           const snapshot = await api.getRunSnapshot(taskId, run.run_id);
           if (cancelled) return;
@@ -105,25 +117,30 @@ export function TaskPage() {
             pushEvent(event);
             if (ARTIFACT_EVENT_TYPES.has(event.type)) sawArtifactEvent = true;
           }
+          loadedRuns.current.add(run.run_id);
         } catch {
-          // 旧版任务没有 stream.jsonl：跳过（详见 issues 文档）
+          // 旧版任务没有 stream.jsonl：标记跳过，避免每次轮询重试（详见 issues 文档）
+          loadedRuns.current.add(run.run_id);
         }
       }
-      if (!cancelled) {
-        setReplaying(false);
-        if (sawArtifactEvent) scheduleArtifactsRefetch();
-      }
+      if (cancelled) return;
+      setReplaying(false);
+      setReplayDoneFor(taskId);
+      if (sawArtifactEvent) scheduleArtifactsRefetch();
     };
     void replay();
     return () => {
       cancelled = true;
+      // 取消时复位骨架屏：若下一次任务详情里 pending 为空，replaying 不再被置回 true
+      setReplaying(false);
     };
-  }, [taskId, task.data, pushEvent, scheduleArtifactsRefetch]);
+  }, [taskId, task.data, liveRunId, pushEvent, scheduleArtifactsRefetch]);
 
-  // 实时流：liveRunId 变化（或提交决策强制重开）时（重新）订阅；
-  // after 取该 run 已处理的最大 seq，重连补发由 reducer 按 seq 判重兜底。
+  // 实时流：初始回放完成后才订阅（after 取该 run 已处理的最大 seq，
+  // 回放与订阅之间漏掉的事件由 reducer 按 seq 判重 + SSE 衔接兜底）；
+  // 提交决策（sseEpoch 变化）强制重开同一 run 的订阅。
   useEffect(() => {
-    if (!taskId || !liveRunId) return;
+    if (!taskId || !liveRunId || replayDoneFor !== taskId) return;
     const after = useTimelineStore.getState().lastSeqByRun[liveRunId] ?? 0;
     let disposed = false;
     const close = subscribeRunEvents(taskId, liveRunId, after, {
@@ -131,6 +148,8 @@ export function TaskPage() {
         const store = useTimelineStore.getState();
         if (store.taskId !== taskId) return;
         store.pushEvent(event);
+        // SSE 已推送的 run 不再走快照回放，避免重复拉取
+        loadedRuns.current.add(event.run_id);
         if (ARTIFACT_EVENT_TYPES.has(event.type)) scheduleArtifactsRefetch();
       },
       onEnd: () => {
@@ -144,7 +163,7 @@ export function TaskPage() {
       disposed = true;
       close();
     };
-  }, [taskId, liveRunId, sseEpoch, queryClient, scheduleArtifactsRefetch]);
+  }, [taskId, liveRunId, replayDoneFor, sseEpoch, queryClient, scheduleArtifactsRefetch]);
 
   const invalidateTask = useCallback(() => {
     if (!taskId) return;

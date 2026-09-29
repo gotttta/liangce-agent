@@ -28,13 +28,14 @@ export function ArtifactPanel() {
     queryFn: () => api.getTask(taskId!),
     enabled: Boolean(taskId),
   });
-  // 产物指向最新 run：latest_run_id 优先，运行窗口内用 active_run_id，
-  // 两者都缺时回退 runs 列表最后一条（runs 按开始时间升序）
+  // 产物指向当前 run：active_run_id 优先——latest_run_id 要等第一次中断才更新，
+  // 第二轮运行迭代期间它仍指向上一轮，会一直显示旧曲线（审查意见 #1）。
+  // 两者都缺时回退 runs 列表最后一条（runs 按开始时间升序）。
   const detail = task.data;
   const fallbackRunId =
     detail && detail.runs.length > 0 ? detail.runs[detail.runs.length - 1].run_id : null;
   const runId = detail
-    ? (detail.latest_run_id ?? detail.active_run_id ?? fallbackRunId)
+    ? (detail.active_run_id ?? detail.latest_run_id ?? fallbackRunId)
     : null;
   const artifacts = useQuery({
     queryKey: ["artifacts", taskId, runId],

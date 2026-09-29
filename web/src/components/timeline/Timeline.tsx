@@ -51,7 +51,7 @@ export function Timeline({
     const element = containerRef.current;
     if (!element) return;
     const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
-    if (nearBottom) element.scrollTo({ top: element.scrollHeight });
+    if (nearBottom) element.scrollTop = element.scrollHeight; // jsdom 无 scrollTo，直接赋值
   }, [signature]);
 
   // 初次挂载（历史回放完成）直接定位到底部

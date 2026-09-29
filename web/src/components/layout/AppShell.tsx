@@ -57,6 +57,7 @@ export function AppShell() {
     const onKey = (event: KeyboardEvent) => {
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
+      if (event.repeat) return; // 按住不放只触发一次
       if (event.key.toLowerCase() === "k") {
         event.preventDefault();
         void api
