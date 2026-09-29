@@ -20,6 +20,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { statusDotClass } from "@/lib/status";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 function TaskRow({ task }: { task: TaskSummary }) {
@@ -180,7 +181,11 @@ export function Sidebar() {
       </div>
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
         {tasks.isLoading ? (
-          <div className="px-2 py-2 text-xs text-muted-foreground">加载中…</div>
+          <div className="space-y-1 p-1">
+            <Skeleton className="h-8 w-full rounded-lg" />
+            <Skeleton className="h-8 w-full rounded-lg" />
+            <Skeleton className="h-8 w-3/4 rounded-lg" />
+          </div>
         ) : tasks.data ? (
           tasks.data.map((task) => <TaskRow key={task.id} task={task} />)
         ) : null}

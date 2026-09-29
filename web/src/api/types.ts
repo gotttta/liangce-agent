@@ -165,3 +165,35 @@ export interface RunSnapshot {
   status: string;
   events: UiEvent[];
 }
+
+// ---- 产物（GET /artifacts，计划 §6.3 / §9.6）----
+
+export interface ReferenceInfo {
+  image_id: string;
+  image_url: string;
+  overlay_url: string | null;
+  sam_iou_score: number;
+  skip_scoring: boolean;
+  skip_reason: string;
+  confirmed_at: string;
+}
+
+export interface IterationRecord {
+  iteration: number;
+  run_score: {
+    image_scores: ImageScore[];
+    composite_mean: number;
+  };
+  algorithm_spec: {
+    pipeline: Record<string, unknown>[];
+    notes: string;
+  };
+  timestamp: string;
+}
+
+export interface Artifacts {
+  algorithm: { pipeline?: Record<string, unknown>[]; notes?: string } | null;
+  score: Record<string, unknown> | null;
+  iterations: IterationRecord[];
+  references: ReferenceInfo[];
+}

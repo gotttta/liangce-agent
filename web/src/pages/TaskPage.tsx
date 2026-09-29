@@ -7,8 +7,12 @@ import { Composer, type TargetType } from "@/components/composer/Composer";
 import { Timeline } from "@/components/timeline/Timeline";
 import type { ReviewAction } from "@/components/timeline/ReviewCard";
 import { TopBar } from "@/components/layout/TopBar";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useUiStore } from "@/store/ui";
 import { groupTimeline, useTimelineStore } from "@/store/timeline";
+
+// 收到这三类事件后产物面板的数据变了（计划 §9.6：节流 2 秒失效重取）
+const ARTIFACT_EVENT_TYPES = new Set(["iteration_scored", "reference_candidate", "run_finished"]);
 
 interface ManualRun {
   taskId: string;
@@ -42,6 +46,8 @@ export function TaskPage() {
   const [sseEpoch, setSseEpoch] = useState(0);
   const [uploading, setUploading] = useState<string[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [replaying, setReplaying] = useState(false);
+  const artifactsTimer = useRef<number | null>(null);
 
   // 切换任务时丢弃旧任务的 manual 接管（渲染期状态调整，避免 effect 里 setState）
   if (manual && manual.taskId !== taskId) setManual(null);
@@ -55,6 +61,22 @@ export function TaskPage() {
   // 服务器“运行中”可能滞后于事件流：时间线里已有终态的 run 不算运行
   const running = manualRunId !== null || (serverRunId !== null && !(serverRunId in runStatus));
 
+  // 产物数据节流失效（2 秒窗口合并连续事件）
+  const scheduleArtifactsRefetch = useCallback(() => {
+    if (artifactsTimer.current != null) return;
+    artifactsTimer.current = window.setTimeout(() => {
+      artifactsTimer.current = null;
+      if (taskId) void queryClient.invalidateQueries({ queryKey: ["artifacts", taskId] });
+    }, 2000);
+  }, [queryClient, taskId]);
+
+  useEffect(
+    () => () => {
+      if (artifactsTimer.current != null) window.clearTimeout(artifactsTimer.current);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!taskId) return;
     loadedRuns.current = new Set();
@@ -64,9 +86,13 @@ export function TaskPage() {
   // 历史回放：对任务详情里出现的每个 run 拉快照重放（按顺序 await，保证 run 顺序）
   useEffect(() => {
     if (!taskId || !task.data) return;
+    const pending = task.data.runs.filter((run) => !loadedRuns.current.has(run.run_id));
+    if (pending.length === 0) return;
     let cancelled = false;
+    setReplaying(true);
     const replay = async () => {
-      for (const run of task.data!.runs) {
+      let sawArtifactEvent = false;
+      for (const run of pending) {
         if (cancelled || loadedRuns.current.has(run.run_id)) continue;
         loadedRuns.current.add(run.run_id);
         try {
@@ -75,17 +101,24 @@ export function TaskPage() {
           const events = [...snapshot.events].sort((a, b) => a.seq - b.seq);
           const store = useTimelineStore.getState();
           if (store.taskId !== taskId) return;
-          for (const event of events) pushEvent(event);
+          for (const event of events) {
+            pushEvent(event);
+            if (ARTIFACT_EVENT_TYPES.has(event.type)) sawArtifactEvent = true;
+          }
         } catch {
           // 旧版任务没有 stream.jsonl：跳过（详见 issues 文档）
         }
+      }
+      if (!cancelled) {
+        setReplaying(false);
+        if (sawArtifactEvent) scheduleArtifactsRefetch();
       }
     };
     void replay();
     return () => {
       cancelled = true;
     };
-  }, [taskId, task.data, pushEvent]);
+  }, [taskId, task.data, pushEvent, scheduleArtifactsRefetch]);
 
   // 实时流：liveRunId 变化（或提交决策强制重开）时（重新）订阅；
   // after 取该 run 已处理的最大 seq，重连补发由 reducer 按 seq 判重兜底。
@@ -98,6 +131,7 @@ export function TaskPage() {
         const store = useTimelineStore.getState();
         if (store.taskId !== taskId) return;
         store.pushEvent(event);
+        if (ARTIFACT_EVENT_TYPES.has(event.type)) scheduleArtifactsRefetch();
       },
       onEnd: () => {
         if (disposed) return;
@@ -110,7 +144,7 @@ export function TaskPage() {
       disposed = true;
       close();
     };
-  }, [taskId, liveRunId, sseEpoch, queryClient]);
+  }, [taskId, liveRunId, sseEpoch, queryClient, scheduleArtifactsRefetch]);
 
   const invalidateTask = useCallback(() => {
     if (!taskId) return;
@@ -221,14 +255,23 @@ export function TaskPage() {
           addFiles(Array.from(event.dataTransfer.files));
         }}
       >
-        <Timeline
-          entries={entries}
-          messageByRun={messageByRun}
-          bestPipeline={detail.best?.pipeline ?? null}
-          onOpenArtifacts={() => setRightPanel(true)}
-          onReviewSubmit={submitReview}
-          onRetry={(message) => void startRun(message, "defect")}
-        />
+        {replaying && entries.length === 0 ? (
+          <div className="mx-auto max-w-3xl space-y-3 px-6 py-8">
+            <Skeleton className="ml-auto h-10 w-64 rounded-2xl" />
+            <Skeleton className="h-14 w-full rounded-xl" />
+            <Skeleton className="h-14 w-5/6 rounded-xl" />
+            <Skeleton className="h-40 w-full rounded-xl" />
+          </div>
+        ) : (
+          <Timeline
+            entries={entries}
+            messageByRun={messageByRun}
+            bestPipeline={detail.best?.pipeline ?? null}
+            onOpenArtifacts={() => setRightPanel(true)}
+            onReviewSubmit={submitReview}
+            onRetry={(message) => void startRun(message, "defect")}
+          />
+        )}
       </main>
       {uploadError && (
         <p className="px-6 pb-1 text-xs text-red-600" role="alert">

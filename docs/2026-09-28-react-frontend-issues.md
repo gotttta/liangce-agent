@@ -14,3 +14,10 @@
 
 - [阶段5] §12.3 的旧任务回放（只有 `conversation.jsonl` 的 Gradio 时代任务显示为纯文本对话 + 顶部提示）没有实现：§6 没有对应 API，属计划未覆盖的接口缺口。/ 阶段 5 先跳过（旧任务在新 UI 里显示为空时间线）。/ 需要决定在阶段 6/7 补一个只读端点还是接受旧任务不可见。
 
+- [阶段6] `ReferenceGallery` 曾把 `state.items.filter(...)` 的派生数组直接写进 zustand selector：每次渲染新引用 → useSyncExternalStore 快照不稳定 → 无限重渲染，首个时间线事件到达时整棵 React 树崩溃（root 清空、SSE 断开，真实浏览器验收触发）。/ 已修：selector 只取 `state.items` 稳定引用，过滤放 `useMemo`。/ 已排查全部 selector，无同类问题。
+
+- [阶段6] core 的轮次编号两套口径：事件流 `iteration_scored.iteration` 从 1 开始（`iterate` 节点先 `state.iteration + 1` 再打分），`iteration_history.jsonl` 按行计数从 0 开始，同一轮在时间线和产物面板里差 1。/ 前端在 ScoreChart 展示层 +1 对齐时间线文案。/ core 侧统一编号（tracker.record 改用 `state.iteration`）属于 core 行为改动，只记录不修。
+
+- [阶段6] 验收用 fake 后端（tests/fixtures/serve_fake_backend.py）需要产物数据：已让它复用真实 `TaskStore.save_run_state` / `ReferenceStore` / `IterationTracker` 落盘，与真实链路同构；不涉及产品代码。
+
+

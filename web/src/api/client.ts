@@ -1,4 +1,5 @@
 import type {
+  Artifacts,
   Health,
   RunSnapshot,
   SampleOut,
@@ -92,4 +93,6 @@ export const api = {
     }),
   getRunSnapshot: (taskId: string, runId: string) =>
     request<RunSnapshot>(`/api/tasks/${taskId}/runs/${runId}`),
+  getArtifacts: (taskId: string, runId: string) =>
+    request<Artifacts>(`/api/tasks/${taskId}/runs/${runId}/artifacts`),
 };

@@ -37,6 +37,9 @@ from core.agent_events import (  # noqa: E402
     emit_tool_result,
 )
 from core.agent_workflow import NODE_LABELS  # noqa: E402
+from core.iteration_tracker import IterationTracker  # noqa: E402
+from core.reference_store import ReferenceStore  # noqa: E402
+from core.scoring import ImageScore, RunScore  # noqa: E402
 
 WORKSPACE = Path("/tmp/liangce-fake-backend")
 
@@ -64,13 +67,19 @@ class DemoFlows:
         self.image_index = 0
         self.iterated = False
         self.best = 0.0
+        self.best_pipeline: list[dict] = []
         self.task_id = ""
         self.run_id = ""
+        self.run_dir = root / "outputs"
+        self.description = ""
+        self.pending_image: Path | None = None
+        self._pending_score = 0.0
+        self.task_store = None
 
     def _save_snapshot(self, status: str, message: str = "", stop_reason: str | None = None,
                        pending_image: str | None = None, overlay: str | None = None):
         """模仿 run_agent_graph 的 save_run_state：任务详情的 runs 列表读 latest.json，
-        刷新页面后的时间线回放依赖它。"""
+        latest_run_id / pending_review 由 TaskStore 维护。"""
         run_dir = self.root / "workspace" / "tasks" / self.task_id / "runs" / self.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         snapshot = {
@@ -79,21 +88,58 @@ class DemoFlows:
             "run_started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "stop_reason": stop_reason,
             "best_score": self.best,
-            "conversation": [{"role": "assistant", "content": message}] if message else [],
+            "pipeline": {"pipeline": self.best_pipeline, "notes": "验收用最优算法"}
+            if self.best_pipeline else {},
+            "conversation": ([{"role": "assistant", "content": message}] if message else []),
         }
         if pending_image:
             snapshot["pending_reference_image_id"] = pending_image
             snapshot["pending_reference_overlay_path"] = overlay or ""
         (run_dir / "latest.json").write_text(json.dumps(snapshot, ensure_ascii=False),
                                              encoding="utf-8")
+        if self.task_store is not None:
+            self.task_store.save_run_state(self.task_id, snapshot)
+
+    def _confirm_pending_reference(self, image_path: Path, sam_score: float):
+        """用户确认后把参考掩膜落盘（真实流程在 human_gate 节点做）。"""
+        image_id = image_path.stem
+        references_root = self.root / "workspace" / "tasks" / self.task_id / "reference_masks"
+        image = np.array(Image.open(image_path).convert("L"))
+        mask = image > 120
+        ReferenceStore(references_root).save(image_id, mask, {
+            "image_id": image_id,
+            "image_path": str(image_path),
+            "task": self.description,
+            "target_type": "defect",
+            "sam_iou_score": round(sam_score, 3),
+            "skip_scoring": sam_score < 0.7,
+            "skip_reason": "" if sam_score >= 0.7 else
+            f"SAM IoU 分数均值 {sam_score:.3f} 低于 0.7",
+            "confirmed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "confirmed_by": "user",
+        })
+
+    def _write_final_artifacts(self):
+        run_dir = self.run_dir
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "algorithm.json").write_text(
+            json.dumps({"pipeline": self.best_pipeline, "notes": "验收用最优算法"},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+        (run_dir / "score.json").write_text(
+            json.dumps({"composite_mean": self.best}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
 
     # --- 第 1 段：prepare → 第一张图的参考确认 ---
 
-    def start(self, *, target_image_paths, description, task_id, thread_id, **kwargs):
+    def start(self, *, target_image_paths, description, task_id, thread_id,
+              output_root, task_store=None, **kwargs):
         self.paths = list(target_image_paths)
         self.slow = "慢速" in str(description or "")
         self.task_id = task_id
         self.run_id = thread_id
+        self.description = str(description or "")
+        self.task_store = task_store
+        self.run_dir = Path(output_root) / thread_id
         emit_node_start("prepare", NODE_LABELS["prepare"])
         emit_thinking_delta(f"收到任务，共 {len(self.paths)} 张样本图。", "model_reasoning")
         emit_thinking_delta("先检查输入，再逐张生成参考掩膜。", "model_reasoning")
@@ -111,9 +157,13 @@ class DemoFlows:
 
     def resume(self, *, response, **kwargs):
         action = str(response.get("action"))
+        if self.pending_image is not None and action == "continue":
+            pending, self.pending_image = self.pending_image, None
+            self._confirm_pending_reference(pending, self._pending_score)
         if action == "exit":
             emit_node_start("finish", NODE_LABELS["finish"])
             emit_node_complete("finish", 0.3, {"best_score": self.best})
+            self._write_final_artifacts()
             self._save_snapshot("completed", "任务已结束")
             return {"run_status": "completed", "best_score": self.best}
 
@@ -126,6 +176,7 @@ class DemoFlows:
             return self._final_interrupt()
         emit_node_start("finish", NODE_LABELS["finish"])
         emit_node_complete("finish", 0.35, {"best_score": self.best})
+        self._write_final_artifacts()
         self._save_snapshot("completed", "已写出最优算法与分数")
         return {"run_status": "completed", "best_score": self.best}
 
@@ -156,6 +207,8 @@ class DemoFlows:
         emit_tool_result("generate_reference_mask",
                          {"status": "ok", "data": {"sam_points": 3}}, True)
         sam_score = 0.52 if index == 1 else 0.88 + 0.04 * (index % 3)
+        self.pending_image = Path(self.paths[index])
+        self._pending_score = round(sam_score, 3)
         emit_event({
             "type": "reference_candidate",
             "image_id": image_id,
@@ -179,10 +232,19 @@ class DemoFlows:
                     "best_score": self.best, "stop_reason": None}}]}
 
     def _iterate(self):
+        tracker = IterationTracker(self.run_dir)
         rounds = [(1, 0.62, True, ["normalize", "clahe", "adaptive_threshold"]),
                   (2, 0.71, True, ["normalize", "clahe", "otsu_threshold"]),
                   (3, 0.58, False, ["normalize", "gamma", "otsu_threshold"])]
         for iteration, score, improved, ops in rounds:
+            pipeline = [{"op": op} for op in ops]
+            image_scores = [
+                ImageScore(image_id=Path(path).stem, iou_mean=round(score + 0.03, 3),
+                           false_positive_count=1, false_negative_count=0,
+                           ref_count=4, composite=round(score + 0.03, 3))
+                for path in self.paths[:2]
+            ]
+            run_score = RunScore(image_scores=image_scores, composite_mean=score)
             emit_node_start("iterate", NODE_LABELS["iterate"])
             emit_thinking_delta(f"第 {iteration} 轮：尝试 ", "model_reasoning")
             emit_thinking_delta(" → ".join(ops), "model_reasoning")
@@ -199,22 +261,27 @@ class DemoFlows:
                 "composite_mean": score,
                 "best_score_before": self.best,
                 "improved": improved,
-                "pipeline": [{"op": op} for op in ops],
+                "pipeline": pipeline,
                 "notes": f"第 {iteration} 轮组合，composite_mean={score:.2f}",
                 "image_scores": [
-                    {"image_id": Path(path).stem, "iou_mean": score + 0.03,
-                     "false_positive_count": 1, "false_negative_count": 0,
-                     "ref_count": 4, "composite": score + 0.03}
-                    for path in self.paths[:2]
+                    {"image_id": item.image_id, "iou_mean": item.iou_mean,
+                     "false_positive_count": item.false_positive_count,
+                     "false_negative_count": item.false_negative_count,
+                     "ref_count": item.ref_count, "composite": item.composite}
+                    for item in image_scores
                 ],
                 "timestamp": time.time(),
             })
+            # 与真实 score 节点一致：tracker.record 落 iteration_history.jsonl
+            tracker.record(run_score, {"pipeline": pipeline,
+                                       "notes": f"第 {iteration} 轮组合"})
             emit_node_complete("score", 4.5 + iteration,
                                {"composite_mean": score, "improved": improved})
             if improved:
                 emit_node_start("promote", NODE_LABELS["promote"])
                 emit_node_complete("promote", 0.1, {"best_score": score})
                 self.best = score
+                self.best_pipeline = pipeline
             time.sleep(0.8)
 
     def _final_interrupt(self):

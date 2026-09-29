@@ -1,5 +1,6 @@
 import { CircleAlert, CircleHelp, ShieldCheck } from "lucide-react";
 import { useState } from "react";
+import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -9,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { toast } from "@/components/ui/toast";
 import { Textarea } from "@/components/ui/textarea";
 import { formatPipeline, formatScore, stopReasonLabel } from "@/lib/format";
 import type { ReviewItem, ReviewResolved } from "@/store/timeline";
@@ -61,7 +63,12 @@ export function ReviewCard({ review, onSubmit, bestPipeline, onOpenArtifacts }: 
         feedbackText ? { action, feedback: feedbackText } : { action },
       );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "提交失败，请重试");
+      if (cause instanceof ApiError && cause.status === 409) {
+        // 任务仍在运行（如另一标签页刚提交过）：toast 提示并保持可重试
+        toast("任务仍在运行，请等待本次运行结束后再操作。", "error");
+      } else {
+        setError(cause instanceof Error ? cause.message : "提交失败，请重试");
+      }
     } finally {
       setSubmitting(false);
     }

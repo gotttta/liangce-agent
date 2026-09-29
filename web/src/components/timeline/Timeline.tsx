@@ -63,6 +63,12 @@ export function Timeline({
   return (
     <div ref={containerRef} className="h-full overflow-y-auto" data-testid="timeline">
       <div className="mx-auto max-w-3xl space-y-3 px-6 py-8">
+        {entries.length === 0 ? (
+          <div className="flex min-h-48 flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+            <span>还没有对话</span>
+            <span className="text-xs">上传样本图、描述检测目标后开始；运行中的进度会实时显示在这里</span>
+          </div>
+        ) : null}
         {entries.map((entry) => {
           if (entry.kind === "iteration_group") {
             return <IterationGroup key={entry.id} group={entry} />;

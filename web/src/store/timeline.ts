@@ -129,10 +129,12 @@ export interface TimelineState {
   lastSeqByRun: Record<string, number>;
   /** 每个 run 最近一次 run_finished 的状态。 */
   runStatus: Record<string, RunFinishStatus>;
+  /** 最近一次模型调用的上下文占用（§9.7 顶栏圆环）。 */
+  contextUsage: { used: number; window: number } | null;
 }
 
 export function createTimelineState(): TimelineState {
-  return { items: [], lastSeqByRun: {}, runStatus: {} };
+  return { items: [], lastSeqByRun: {}, runStatus: {}, contextUsage: null };
 }
 
 // --- 查找辅助：全部基于 items 扫描，不维护额外配对状态，保证重放一致 ---
@@ -371,6 +373,15 @@ export function applyEvent(state: TimelineState, event: UiEvent): TimelineState 
     }
 
     case "model_call_finished": {
+      // 上下文占用沿用旧 UI 的口径（ui/utils/formatters.py）：
+      // prompt_tokens 是当前上下文足迹，缺失时退回 total_tokens
+      const used = event.usage?.prompt_tokens ?? event.usage?.total_tokens;
+      if (typeof used === "number" && event.context_window) {
+        next = {
+          ...next,
+          contextUsage: { used, window: event.context_window },
+        };
+      }
       const location = findChildLocation(next.items, event.call_id);
       if (!location) return next;
       const items = [...next.items];

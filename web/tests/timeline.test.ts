@@ -93,7 +93,38 @@ describe("fixture 回放", () => {
       "接受当前最优结果",
     ]);
   });
+
+  it("记录最近一次模型调用的上下文占用（§9.7，口径为 prompt_tokens）", () => {
+    const state = replay();
+    expect(state.contextUsage).toEqual({ used: 512, window: 131072 });
+
+    let fallback = createTimelineState();
+    fallback = applyEvent(fallback, {
+      ...baseEvent(1),
+      type: "model_call_finished",
+      call_id: "call:1",
+      usage: { total_tokens: 200 },
+      context_window: 4096,
+      duration: 1,
+    });
+    expect(fallback.contextUsage).toEqual({ used: 200, window: 4096 });
+
+    let missing = createTimelineState();
+    missing = applyEvent(missing, {
+      ...baseEvent(1),
+      type: "model_call_finished",
+      call_id: "call:2",
+      usage: null,
+      context_window: null,
+      duration: 1,
+    });
+    expect(missing.contextUsage).toBeNull();
+  });
 });
+
+function baseEvent(seq: number) {
+  return { seq, run_id: "agent_test", ts: 1_000 + seq };
+}
 
 describe("重复 seq 忽略与重放一致", () => {
   it("同一序列重放两遍，第二遍全部被忽略", () => {
