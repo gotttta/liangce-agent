@@ -218,17 +218,6 @@ def test_13_concurrent_requests_do_not_receive_each_others_events():
     assert a[0]['task_id'] == a[0]['run_id'] == 'a'
 
 
-def test_13_invalid_input_cleans_listener(tmp_path, monkeypatch):
-    from ui.annotation_app import run_chat_agent
-    from core.agent_events import _event_listeners
-    monkeypatch.setattr('ui.annotation_app.TASK_ROOT', tmp_path / 'tasks')
-    before = list(_event_listeners)
-    for _ in range(2):
-        with pytest.raises(Exception):
-            run_chat_agent(None, 'detect', [], None)
-        assert _event_listeners == before
-
-
 def test_14_long_source_has_exact_hash_addressed_retrieval():
     from providers.vision import build_revision_context_text
     from core.tools.discovery import query_operators
@@ -269,34 +258,6 @@ def test_design_8_docker_large_image(docker_sandbox):
     result = execute_pipeline_sandbox(pixels, normalize_pipeline(mask_pipeline()))
     assert result.mask.data.shape == (2048, 2048)
     assert result.mask.data.sum() == 100
-
-
-def test_01_same_size_image_switch_drops_gt_and_old_brush(tmp_path, monkeypatch):
-    from core.task_store import TaskStore
-    from ui.annotation_app import store_ground_truth_annotation, save_canvas_feedback
-    monkeypatch.setattr('ui.annotation_app.TASK_ROOT', tmp_path / 'tasks')
-    store = TaskStore(tmp_path / 'tasks')
-    task = store.create_task()
-    a, _ = source(tmp_path, 0, name='a.png')
-    b, _ = source(tmp_path, 1, name='b.png')
-    gt, _ = source(tmp_path, 255, name='gt.png')
-    task = store_ground_truth_annotation(str(gt), task, str(a))
-    assert task['ground_truth']['input_sha256'] == input_identity(a)['input_sha256']
-    red = np.zeros((40, 40, 4), np.uint8)
-    red[1:3, 1:3] = [255, 0, 0, 255]
-    old = save_canvas_feedback({'background': str(a), 'layers': [red]}, task,
-                              {**input_identity(a), 'target_image_path': str(a)})
-    previous, _ = store.memory_service.prepare(task['id'], '继续', b, old)
-    assert previous is None
-    # The old upload still present in a Gradio component must not be rebound.
-    task = store_ground_truth_annotation(str(gt), task, str(b))
-    assert task['ground_truth'] is None
-    green = np.zeros_like(red)
-    green[7:9, 7:9] = [0, 255, 0, 255]
-    new = save_canvas_feedback({'background': str(b), 'layers': [green]}, task,
-                              {**input_identity(b), 'target_image_path': str(b)})
-    assert new['false_positive_pixel_count'] == 0
-    assert new['false_negative_pixel_count'] == 4
 
 
 def test_12_candidate_switch_refreshes_text_and_removes_stale_files(tmp_path):
@@ -399,30 +360,6 @@ def test_contract_user_change_has_version_and_source():
     assert original['rendering']['contour_color'] == '#39FF14'
     assert next_contract['rendering']['contour_color'] == '#ff0000'
     assert next_contract['version'] == 2 and next_contract['changes'][0]['source_quote'] == '改为红色'
-
-
-def test_13_stream_deadline_cancels_and_cleans_listener(tmp_path, monkeypatch):
-    from ui.annotation_app import run_chat_agent_stream
-    from core.agent_events import _event_listeners, register_event_listener, unregister_event_listener, emit_thinking
-    from core.request_control import check_cancelled
-    import time
-    before = list(_event_listeners)
-    cleaned = threading.Event()
-    def waiting(*args, **kwargs):
-        callback = lambda event: None
-        register_event_listener(callback)
-        try:
-            while True:
-                check_cancelled()
-                time.sleep(.01)
-        finally:
-            unregister_event_listener(callback)
-            cleaned.set()
-    monkeypatch.setattr('ui.annotation_app.run_chat_agent', waiting)
-    monkeypatch.setenv('LIANGCE_REQUEST_TIMEOUT_SECONDS', '.03')
-    updates = list(run_chat_agent_stream('sample.png', 'detect', [], None))
-    assert updates and cleaned.wait(1)
-    assert _event_listeners == before
 
 
 def test_10_structured_boxes_use_task_color_after_final_image(tmp_path, monkeypatch):

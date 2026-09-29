@@ -26,4 +26,6 @@
 
 - [阶段6] 验收用 fake 后端（tests/fixtures/serve_fake_backend.py）需要产物数据：已让它复用真实 `TaskStore.save_run_state` / `ReferenceStore` / `IterationTracker` 落盘，与真实链路同构；不涉及产品代码。
 
+- [阶段7] 环境漂移：`.python-version` 与两个锁文件都按 Python 3.12 生成，但本机 `.venv` 实际是 3.14.6（阶段 7 之前已如此）。/ 未改锁（重定向到 3.14 会造成大面积版本变动，超出本阶段范围）；`uv pip sync` 在 3.14 上实测可完整安装（锁内哈希为全平台覆盖），全量 pytest 通过。/ 需要确认：要么统一把 `.python-version`/锁升到 3.14 并重生成，要么重建 3.12 的 venv——属仓库基础设施决策。另记：`uv pip sync` 卸载 gradio 后会在 site-packages 残留空的 `gradio/` 目录（namespace package），`import gradio` 仍能成功，会让"动态 import 检查"失真；验收时需删掉该目录或用 `find_spec` 判断。
+
 

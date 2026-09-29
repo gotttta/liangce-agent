@@ -49,10 +49,3 @@ def test_budget_environment(monkeypatch):
     monkeypatch.setenv('LIANGCE_SANDBOX_MAX_STEPS', '512')
     limits = SandboxLimits.from_env()
     assert (limits.timeout_seconds, limits.memory_mb, limits.max_steps) == (90, 2048, 512)
-
-
-def test_structured_result_card_escapes_and_displays_measurements():
-    from ui.utils.formatters import format_task_card
-    card = format_task_card({'measurements': {'structured_outputs': {'value': {'data': {'width': 42, 'note': '<script>'}}}}})
-    assert '42' in card and '&lt;script&gt;' in card
-    assert '个区域' not in card

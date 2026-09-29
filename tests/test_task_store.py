@@ -138,3 +138,81 @@ def test_delete_task_removes_directory(tmp_path):
     # 越出任务根目录的 id 一律拒绝，防止路径穿越删除。
     with pytest.raises(FileNotFoundError):
         store.delete_task("../escape")
+
+
+# ---- 运行状态持久化（原 tests/test_run_entry.py 中的 TaskStore 部分，UI 层删除后迁到这里）----
+
+def run_state(task_id, **changes):
+    return {
+        "task_id": task_id,
+        "run_id": "run_first",
+        "graph_thread_id": "run_first",
+        "run_started_at": "2026-09-21T12:00:00+00:00",
+        "state_version": 0,
+        "run_status": "running",
+        "phase": "propose",
+        "stop_reason": None,
+        "budget": {"model_calls": 1, "executions": 0},
+        **changes,
+    }
+
+
+@pytest.mark.parametrize("status, projected", [
+    ("awaiting_feedback", "waiting_for_feedback"),
+    ("completed", "completed"),
+    ("stopped", "stopped"),
+    ("failed", "failed"),
+    ("cancelled", "cancelled"),
+    ("interrupted", "interrupted"),
+])
+def test_node_diagnostics_cannot_overwrite_run_status(tmp_path, status, projected):
+    store = TaskStore(tmp_path / "tasks")
+    task_id = store.create_task()["id"]
+    store.save_run_state(task_id, run_state(task_id))
+    state = run_state(task_id, state_version=1, run_status=status,
+                      phase="done", stop_reason="model_budget_exhausted")
+    finished = store.save_run_state(task_id, state)
+
+    store.save_node_result(task_id, "execute_candidate", {}, {}, 0.1)
+    store.save_node_result(task_id, "late_diagnostic", {}, {}, 0.1, status="failed")
+
+    assert store.load_task(task_id) == finished
+    assert store.list_tasks()[0]["status"] == projected
+    restored = store.load_latest_state(task_id)
+    assert restored["run_status"] == status
+    assert restored["stop_reason"] == "model_budget_exhausted"
+    assert restored["budget"] == state["budget"]
+
+
+def test_delayed_run_and_state_versions_do_not_replace_latest(tmp_path):
+    store = TaskStore(tmp_path / "tasks")
+    task_id = store.create_task()["id"]
+    old = run_state(task_id)
+    store.save_run_state(task_id, old)
+    newer = run_state(task_id, run_id="run_second", graph_thread_id="run_second",
+                      run_started_at="2026-09-21T12:01:00+00:00", state_version=4,
+                      run_status="cancelled", phase="done")
+    latest = store.save_run_state(task_id, newer)
+
+    for stale in (
+        {**old, "state_version": 100, "run_status": "awaiting_feedback"},
+        {**newer, "state_version": 3, "run_status": "running"},
+        {**newer, "run_status": "running"},
+        {**old, "run_id": "unknown_old", "run_started_at": None},
+    ):
+        assert store.save_run_state(task_id, stale) == latest
+    assert store.load_latest_state(task_id)["run_id"] == "run_second"
+    assert store.load_latest_state(task_id)["run_status"] == "cancelled"
+
+
+def test_run_projection_validates_task_and_path_scope(tmp_path):
+    store = TaskStore(tmp_path / "tasks")
+    task_id = store.create_task()["id"]
+    with pytest.raises(ValueError, match="valid run_id"):
+        store.save_run_state(task_id, run_state(task_id, run_id="../escape"))
+    with pytest.raises(ValueError, match="another task"):
+        store.save_run_state(task_id, run_state("other_task"))
+    with pytest.raises(ValueError, match="valid run_status"):
+        store.save_run_state(task_id, run_state(task_id, run_status="unknown"))
+    store.save_run_state(task_id, run_state(task_id, run_id="run.v2"))
+    assert store.load_latest_state(task_id)["run_id"] == "run.v2"

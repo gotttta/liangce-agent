@@ -150,18 +150,23 @@ python3 main.py \
 ## Web UI
 
 ```bash
-python3 -m ui.app
+cd web && npm install && npm run build && cd ..
+python3 -m api
 ```
 
-Open `http://127.0.0.1:7860`.
+Open `http://127.0.0.1:8765`. `python3 -m api` serves both the REST API and the
+built frontend; run only one instance at a time. For frontend development, keep
+`python3 -m api` running and start the Vite dev server in `web/` (`npm run dev`,
+http://127.0.0.1:5173, proxies `/api` to 8765).
 
 Production controller runs have a 600-second deadline by default. An optional
 `LIANGCE_REQUEST_TIMEOUT_SECONDS` adds an enclosing request deadline; unset or
 `0` disables that extra limit, not the controller deadline. Restart an existing
-service after changing configuration. Browser disconnection currently cancels
-the active web request; it does not leave an independent background job running.
+service after changing configuration. Runs execute in background threads and
+outlive the browser connection: closing or refreshing the page does not cancel
+a run; only the stop control (cancel endpoint) does.
 
-`ui.app` is the supported web entry point. Both the CLI and web UI execute the canonical graph in
+`python3 -m api` is the supported web entry point. Both the CLI and web UI execute the canonical graph in
 `core/agent_graph.py`.
 
 The production Aliyun provider uses explicit LangGraph business nodes:
@@ -448,13 +453,13 @@ domain-specific verification rule is automatically enforced.
 
 ## Runtime logs / 调试日志
 
-CLI (`python main.py ...`) and web (`python -m ui.app`) write application logs
+CLI (`python main.py ...`) and web (`python3 -m api`) write application logs
 both to stderr and to `workspace/logs/agent.log` under the project root.
 Restart an already running server to load this logging configuration.
 
 ```bash
 tail -f workspace/logs/agent.log
-LIANGCE_LOG_LEVEL=DEBUG python -m ui.app
+LIANGCE_LOG_LEVEL=DEBUG python3 -m api
 ```
 
 Each line includes timestamp, level, task ID, request/run ID and stage. A web

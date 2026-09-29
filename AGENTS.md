@@ -6,7 +6,6 @@
 - 默认日志为项目根目录下的 `workspace/logs/agent.log`，同时输出到终端 stderr。先确认文件更新时间；旧日志不代表当前进程。
 - 每行包含时间、级别、`task=`、`run=`、`stage=`。同一次请求的嵌套模型和工作流调用沿用运行 ID；CLI 没有网页任务时 `task=-`。
 - 节点和工具事件记录执行进度；模型调用记录开始、结束、耗时和异常堆栈；部分可恢复失败也会保留堆栈。根据开始/结束事件判断停在哪一步，不要仅凭页面状态推断失败。
-- `tmp/ui_app.log` 是历史启动输出，不是当前统一日志入口。
 
 ## 启动与查看
 
@@ -14,13 +13,22 @@
 
 ```bash
 source .venv/bin/activate
-python -m ui.app
+cd web && npm install && npm run build && cd ..
+python -m api          # http://127.0.0.1:8765
+```
+
+同一时刻只运行一个 `python -m api` 实例：任务文件锁可以跨进程，但运行状态在各进程内存里，双实例会互相看不到对方的活动运行。
+
+前端开发模式（热更新，另开终端，后端照常启动）：
+
+```bash
+cd web && npm install && npm run dev   # http://127.0.0.1:5173，/api 代理到 8765
 ```
 
 需要工具参数摘要时，以 DEBUG 模式启动：
 
 ```bash
-LIANGCE_LOG_LEVEL=DEBUG python -m ui.app
+LIANGCE_LOG_LEVEL=DEBUG python -m api
 ```
 
 另开终端实时查看（人工操作）：
@@ -48,7 +56,7 @@ rg -n -F 'run=<实际运行ID>' workspace/logs/agent.log*
 | `LIANGCE_LOG_MAX_BYTES` | `10485760` | 单文件约 10 MiB 时轮转 |
 | `LIANGCE_LOG_BACKUP_COUNT` | `5` | 保留 5 个轮转文件 |
 
-网页入口 `python -m ui.app` 和 CLI 入口 `python main.py ...` 自动配置日志。直接调用 Python API 时，先调用 `core.runtime_logging.configure_logging()`。多个应用进程应使用不同的日志目录。
+网页入口 `python -m api` 和 CLI 入口 `python main.py ...` 自动配置日志。直接调用 Python API 时，先调用 `core.runtime_logging.configure_logging()`。多个应用进程应使用不同的日志目录。
 
 ## 详细记录与维护
 

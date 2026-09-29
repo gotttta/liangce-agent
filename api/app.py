@@ -1,13 +1,13 @@
 """create_app()：挂路由与统一异常处理（计划 §6 错误码表）。
 
-生产模式的静态前端托管（web/dist + SPA fallback）在阶段 7 接入。
+生产模式托管 web/dist（静态文件 + SPA fallback）；dist 缺失时返回构建提示页。
 """
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from core.orchestration_runtime import TaskBusyError
 from core.runtime_logging import logger, redact
@@ -22,7 +22,7 @@ _ERROR_DETAIL_MAX_CHARS = 400
 
 
 def sanitize_error_detail(detail) -> str:
-    """与 ui/annotation_app.py 的 _sanitize_error_detail 同一规则：redact + 压平 + 截断。"""
+    """错误详情统一处理：redact + 压平 + 截断。"""
     collapsed = " ".join(redact(str(detail or "")).split())
     if len(collapsed) > _ERROR_DETAIL_MAX_CHARS:
         return collapsed[:_ERROR_DETAIL_MAX_CHARS] + "…"
@@ -32,6 +32,36 @@ def sanitize_error_detail(detail) -> str:
 def _error(code: str, message: str, status: int) -> JSONResponse:
     body = ErrorResponse(error={"code": code, "message": message})
     return JSONResponse(status_code=status, content=body.model_dump())
+
+
+_BUILD_HINT_HTML = (
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+    "<title>liangce-agent</title></head><body>"
+    "<p>前端尚未构建：请先运行 <code>cd web &amp;&amp; npm install &amp;&amp; npm run build</code>，"
+    "然后重启 <code>python -m api</code>。</p></body></html>"
+)
+
+
+def _mount_spa(app: FastAPI, web_dist: Path) -> None:
+    """托管 web/dist：命中 dist 内的文件直接返回，其余路径回退 index.html（SPA）。
+
+    未匹配任何 /api 路由的请求返回统一格式的 JSON 404，不能回退成页面。
+    必须在所有 API 路由注册之后再挂，否则 catch-all 会抢在它们前面命中。
+    """
+    index = web_dist / "index.html"
+    dist_root = web_dist.resolve()
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            return _error("not_found", "接口不存在。", 404)
+        if not index.is_file():
+            return HTMLResponse(_BUILD_HINT_HTML)
+        if full_path:
+            candidate = (web_dist / full_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(dist_root):
+                return FileResponse(candidate)
+        return FileResponse(index)
 
 
 def create_app(root: Path | None = None, run_fn=None, resume_fn=None,
@@ -103,4 +133,5 @@ def create_app(root: Path | None = None, run_fn=None, resume_fn=None,
         logger.error("API internal error: %s", request.url.path, exc_info=exc)
         return _error("internal_error", sanitize_error_detail(exc), 500)
 
+    _mount_spa(app, app.state.paths.web_dist)
     return app

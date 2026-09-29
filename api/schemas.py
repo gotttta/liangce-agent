@@ -1,8 +1,7 @@
 """Pydantic 请求/响应模型，与 web/src/api/types.ts 一一对应（计划 §6、§8）。"""
 from pydantic import BaseModel
 
-# 任务状态在界面里的中文名（存储值保持英文）。
-# 来源：ui/annotation_app.py 的 _TASK_STATUS_LABELS，阶段 7 删除旧 UI 后以此为准。
+# 任务状态在界面里的中文名（存储值保持英文），沿用原 Gradio 界面的措辞。
 TASK_STATUS_LABELS = {
     "draft": "草稿",
     "in_progress": "进行中",

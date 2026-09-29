@@ -43,6 +43,7 @@ class FakeFlows:
         self.gate = threading.Event()      # set 后 start 才继续（busy/cancel 测试用）
         self.resume_gate = None            # set 后 resume 才开始发事件（订阅时机测试用）
         self.start_raises = None
+        self.loop_forever = False          # True 时 start 持续发事件，直到被取消/超时
         self.overlay = root / "outputs" / "run_overlay.png"
         self.overlay.parent.mkdir(parents=True, exist_ok=True)
         self.overlay.write_bytes(_png_bytes())
@@ -51,6 +52,12 @@ class FakeFlows:
         self.start_calls.append(kwargs)
         if self.start_raises is not None:
             raise self.start_raises
+        if self.loop_forever:
+            # 模拟长运行：只有 emit_event 内置的 check_cancelled 能让它退出
+            while True:
+                emit_event_raw({"type": "node_start", "node": "wait",
+                                "description": "等待取消或超时"})
+                time.sleep(0.02)
         self.gate.wait(timeout=30)
         emit_node_start("prepare", "校验输入并检查参考掩膜")
         emit_thinking_delta("分析任务", "model_reasoning")
@@ -326,6 +333,11 @@ def _read_stream_into(client, task_id, run_id, after, lines):
 
 
 def test_runner_exception_maps_to_error_and_failed(tmp_path, env):
+    # 回归保护（原 tests/test_end_to_end_audit.py 的 v2 版本）：runner 抛异常后
+    # listener 必须注销，不能随运行次数累积。
+    from core.agent_events import _event_listeners
+
+    before = list(_event_listeners)
     env.flows.start_raises = ValueError("生成失败 api_key=SECRET123456 泄漏")
     env.flows.gate.set()
     run_id = env.client.post(f"/api/tasks/{env.task['id']}/runs",
@@ -336,6 +348,27 @@ def test_runner_exception_maps_to_error_and_failed(tmp_path, env):
     assert "SECRET123456" not in error["message"]
     finishes = [event for event in events if event["type"] == "run_finished"]
     assert finishes[-1]["status"] == "failed"
+    # SSE 的 end 帧在 _finish（unregister 之后）才会发出，收到 end 即已清理
+    assert _event_listeners == before
+
+
+def test_request_deadline_cancels_and_cleans_listener(tmp_path, env, monkeypatch):
+    """LIANGCE_REQUEST_TIMEOUT_SECONDS 超时后运行取消，listener 注销。
+
+    回归保护（原 tests/test_end_to_end_audit.py 的 v2 版本）：总时限由
+    RequestControl.from_env() 在 worker 里读取，emit_event 的取消检查点抛
+    RequestCancelled，规则不变，只是执行点从旧 UI 移到了 RunManager。"""
+    from core.agent_events import _event_listeners
+
+    before = list(_event_listeners)
+    env.flows.loop_forever = True
+    monkeypatch.setenv("LIANGCE_REQUEST_TIMEOUT_SECONDS", "0.2")
+    run_id = env.client.post(f"/api/tasks/{env.task['id']}/runs",
+                             json={"message": "找出亮块"}).json()["run_id"]
+    events = _collect_events(env.client, env.task["id"], run_id)
+    finishes = [event for event in events if event["type"] == "run_finished"]
+    assert finishes and finishes[-1]["status"] == "cancelled"
+    assert _event_listeners == before
 
 
 def test_start_without_samples_is_rejected(tmp_path, env):

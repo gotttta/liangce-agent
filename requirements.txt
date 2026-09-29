@@ -4,8 +4,6 @@ opencv-python-headless
 scikit-image>=0.23
 langgraph
 openai
-gradio<6
-huggingface-hub<1.0
 
 fastapi
 uvicorn[standard]
